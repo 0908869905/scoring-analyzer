@@ -55,20 +55,35 @@ ROBOT_MAX_LOST_FRAMES = 30   # 最大丟失幀數
 MAX_ROBOTS = 6               # 最多追蹤機器人數
 
 # ── AI 偵測模式 ─────────────────────────────────────
-DETECTION_MODE = "AI"               # "HSV" or "AI"（預設 AI）
+DETECTION_MODE = "HSV"              # "HSV" or "AI"（預設 HSV，AI 模式需訓練球模型）
 AI_CONFIDENCE_THRESHOLD = 0.25     # ONNX 本地推理：小數（0.25=25%）
 AI_MIN_AREA = 50
 AI_MAX_AREA = 200000
 
-# ── VitTrack 機器人追蹤 ────────────────────────────
+# ── VitTrack 機器人追蹤（SOT fallback）─────────────
 VITTRACK_MODEL_PATH = "models/object_tracking_vittrack_2023sep.onnx"
 VITTRACK_SCORE_THRESHOLD = 0.3
+
+# ── 機器人 YOLO 偵測（MOT 主要模式）──────────────────
+ROBOT_DETECTION_MODEL_PATH = "models/frc_robot.onnx"
+ROBOT_DETECTION_CONFIDENCE = 0.4
+ROBOT_DETECTION_NMS_IOU = 0.45
+
+# ── ByteTrack 多目標追蹤參數 ──────────────────────────
+BYTETRACK_TRACK_THRESH = 0.3       # 追蹤啟動閾值
+BYTETRACK_LOST_BUFFER = 120        # 丟失緩衝（幀數，4秒@30fps）
+BYTETRACK_MATCH_THRESH = 0.8       # 最小匹配閾值
+BYTETRACK_MIN_CONSECUTIVE = 3      # 最少連續幀確認新追蹤
 
 # ── 進球判定參數 ──────────────────────────────────────
 SCORE_PROXIMITY_FRAMES = 15  # 回溯射手歸因的幀數
 SCORE_MAX_SHOOTER_DIST = 300 # 射手歸因最大距離（像素）
 SCORE_ZONE_DWELL_FRAMES = 3  # 球在區域內停留幀數才算進球
 SCORE_COOLDOWN_FRAMES = 10   # 同一球連續進球冷卻幀數
+
+# ── 出手偵測參數 ──────────────────────────────────────
+SHOT_MIN_VELOCITY = 15       # 出手最低速度（像素/幀）
+SHOT_ROBOT_PROXIMITY = 150   # 出手時球距機器人最大距離（像素）
 
 # ── 比賽時間設定（預設值）────────────────────────────
 AUTO_DURATION_SEC = 15       # 自主期秒數

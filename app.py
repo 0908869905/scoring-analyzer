@@ -21,6 +21,7 @@ from config import (
 )
 from detection import detect_yellow_balls, detect_fuel_ai, load_ai_model
 from tracking import CentroidTracker, stitch_trajectories
+from robot_detection import load_robot_model
 from robot_tracker import RobotTrackerManager
 from scoring import ScoringEngine, ScoringZone
 from utils import load_font, format_time
@@ -106,6 +107,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._all_trajectories = {}
         self._frame_detections = {}
         self._robot_positions_cache = {}  # frame_idx -> {label: (cx, cy)}
+        self._robot_bboxes_cache = {}     # frame_idx -> {label: (x1, y1, x2, y2)}
 
         # Auto/Teleop 分界
         self.auto_duration = AUTO_DURATION_SEC
@@ -392,7 +394,8 @@ class ScoringAnalyzer(ctk.CTk):
         score_tree_frame.rowconfigure(0, weight=1)
         score_tree_frame.columnconfigure(0, weight=1)
 
-        score_cols = ("robot", "alliance", "auto", "teleop", "total")
+        score_cols = ("robot", "alliance", "auto", "teleop", "total",
+                      "shots", "miss", "acc")
         self.score_tree = ttk.Treeview(
             score_tree_frame, columns=score_cols, show="headings",
             style="Dark.Treeview")
@@ -400,12 +403,18 @@ class ScoringAnalyzer(ctk.CTk):
         self.score_tree.heading("alliance", text="聯盟")
         self.score_tree.heading("auto", text="Auto")
         self.score_tree.heading("teleop", text="Teleop")
-        self.score_tree.heading("total", text="總計")
-        self.score_tree.column("robot", width=70, anchor=tk.CENTER)
-        self.score_tree.column("alliance", width=45, anchor=tk.CENTER)
-        self.score_tree.column("auto", width=45, anchor=tk.CENTER)
-        self.score_tree.column("teleop", width=55, anchor=tk.CENTER)
-        self.score_tree.column("total", width=45, anchor=tk.CENTER)
+        self.score_tree.heading("total", text="進球")
+        self.score_tree.heading("shots", text="出手")
+        self.score_tree.heading("miss", text="未進")
+        self.score_tree.heading("acc", text="命中率")
+        self.score_tree.column("robot", width=60, anchor=tk.CENTER)
+        self.score_tree.column("alliance", width=35, anchor=tk.CENTER)
+        self.score_tree.column("auto", width=40, anchor=tk.CENTER)
+        self.score_tree.column("teleop", width=48, anchor=tk.CENTER)
+        self.score_tree.column("total", width=40, anchor=tk.CENTER)
+        self.score_tree.column("shots", width=40, anchor=tk.CENTER)
+        self.score_tree.column("miss", width=40, anchor=tk.CENTER)
+        self.score_tree.column("acc", width=48, anchor=tk.CENTER)
 
         score_scroll = ttk.Scrollbar(score_tree_frame, orient=tk.VERTICAL,
                                       command=self.score_tree.yview)
@@ -423,20 +432,22 @@ class ScoringAnalyzer(ctk.CTk):
         event_tree_frame.rowconfigure(0, weight=1)
         event_tree_frame.columnconfigure(0, weight=1)
 
-        ecols = ("idx", "time", "period", "alliance", "shooter")
+        ecols = ("idx", "type", "time", "period", "alliance", "shooter")
         self.event_tree = ttk.Treeview(
             event_tree_frame, columns=ecols, show="headings",
             style="Dark.Treeview")
         self.event_tree.heading("idx", text="#")
+        self.event_tree.heading("type", text="類型")
         self.event_tree.heading("time", text="時間")
         self.event_tree.heading("period", text="期間")
         self.event_tree.heading("alliance", text="聯盟")
         self.event_tree.heading("shooter", text="射手")
-        self.event_tree.column("idx", width=30, anchor=tk.CENTER)
-        self.event_tree.column("time", width=80, anchor=tk.CENTER)
-        self.event_tree.column("period", width=55, anchor=tk.CENTER)
-        self.event_tree.column("alliance", width=45, anchor=tk.CENTER)
-        self.event_tree.column("shooter", width=65, anchor=tk.CENTER)
+        self.event_tree.column("idx", width=28, anchor=tk.CENTER)
+        self.event_tree.column("type", width=40, anchor=tk.CENTER)
+        self.event_tree.column("time", width=75, anchor=tk.CENTER)
+        self.event_tree.column("period", width=50, anchor=tk.CENTER)
+        self.event_tree.column("alliance", width=35, anchor=tk.CENTER)
+        self.event_tree.column("shooter", width=55, anchor=tk.CENTER)
 
         event_scroll = ttk.Scrollbar(event_tree_frame, orient=tk.VERTICAL,
                                       command=self.event_tree.yview)
@@ -689,13 +700,22 @@ class ScoringAnalyzer(ctk.CTk):
                                             scale)
                 cv2.line(resized, p1, p2, color, 1, cv2.LINE_AA)
 
-        # 機器人追蹤框
+        # 機器人追蹤框（優先 bbox，無 bbox 則畫圓點）
+        robot_bboxes = self._robot_bboxes_cache.get(frame_idx, {})
         if frame_idx in self._robot_positions_cache:
             for label, (cx, cy) in self._robot_positions_cache[frame_idx].items():
                 color = self._get_robot_color(label)
-                pt = self._video_to_resized((cx, cy), scale)
-                cv2.circle(resized, pt, 8, color["bgr"], -1, cv2.LINE_AA)
-                cv2.circle(resized, pt, 10, color["bgr"], 2, cv2.LINE_AA)
+                if label in robot_bboxes:
+                    x1, y1, x2, y2 = robot_bboxes[label]
+                    p1 = self._video_to_resized((x1, y1), scale)
+                    p2 = self._video_to_resized((x2, y2), scale)
+                    cv2.rectangle(resized, p1, p2, color["bgr"], 2,
+                                  cv2.LINE_AA)
+                else:
+                    pt = self._video_to_resized((cx, cy), scale)
+                    cv2.circle(resized, pt, 8, color["bgr"], -1, cv2.LINE_AA)
+                    cv2.circle(resized, pt, 10, color["bgr"], 2,
+                               cv2.LINE_AA)
 
         # 進球事件標記
         for event in self.scoring_engine.events:
@@ -712,11 +732,16 @@ class ScoringAnalyzer(ctk.CTk):
     def _draw_analysis_labels(self, draw, frame_idx, scale):
         """繪製分析後的文字標籤。"""
         # 機器人名稱標籤
+        robot_bboxes = self._robot_bboxes_cache.get(frame_idx, {})
         if frame_idx in self._robot_positions_cache:
             for label, (cx, cy) in self._robot_positions_cache[frame_idx].items():
                 color = self._get_robot_color(label)
-                pt = self._video_to_resized((cx, cy - 15), scale)
-                draw.text((pt[0] - 10, pt[1] - 16), label,
+                if label in robot_bboxes:
+                    x1, y1, x2, y2 = robot_bboxes[label]
+                    pt = self._video_to_resized((x1, y1 - 4), scale)
+                else:
+                    pt = self._video_to_resized((cx, cy - 15), scale)
+                draw.text((pt[0], max(0, pt[1] - 16)), label,
                           fill=color["rgb"], font=self._label_font)
 
         # 進球事件文字
@@ -1189,27 +1214,46 @@ class ScoringAnalyzer(ctk.CTk):
             self.after(0, lambda: self._analysis_error("無法開啟影片"))
             return
 
-        # AI 模型載入（若選擇 AI 模式）
+        # AI 球偵測模型載入（若選擇 AI 模式）
         use_ai = self._detection_mode == "AI"
         ai_model = None
         if use_ai:
             try:
                 self.after(0, lambda: self._set_status(
-                    "載入 AI 模型中（本地 ONNX）...", COLORS["info"]))
+                    "載入球偵測 AI 模型中（本地 ONNX）...", COLORS["info"]))
                 ai_model = load_ai_model()
             except Exception as e:
                 err_msg = str(e)
-                print(f"[WARN] AI 模型載入失敗，回退到 HSV: {err_msg}")
+                print(f"[WARN] AI 球偵測模型載入失敗，回退到 HSV: {err_msg}")
                 use_ai = False
                 self.after(0, lambda em=err_msg: self._set_status(
-                    f"AI 載入失敗: {em[:60]}，改用 HSV", COLORS["error"]))
+                    f"球偵測 AI 載入失敗: {em[:60]}，改用 HSV", COLORS["error"]))
+
+        # 機器人偵測模型載入（MOT 模式）
+        robot_detector = None
+        try:
+            self.after(0, lambda: self._set_status(
+                "載入機器人偵測模型中...", COLORS["info"]))
+            robot_detector = load_robot_model()
+            self.after(0, lambda: self._set_status(
+                "機器人偵測模型已載入（MOT 模式）", COLORS["info"]))
+        except FileNotFoundError as e:
+            print(f"[INFO] 機器人偵測模型不可用，使用 SOT 追蹤: {e}")
+            self.after(0, lambda: self._set_status(
+                "機器人偵測模型不可用，使用 SOT 追蹤模式", COLORS["text_secondary"]))
+        except Exception as e:
+            print(f"[WARN] 機器人偵測模型載入失敗: {e}")
+            self.after(0, lambda: self._set_status(
+                "機器人偵測模型載入失敗，使用 SOT 追蹤", COLORS["error"]))
 
         # 初始化球追蹤器
         ball_tracker = CentroidTracker(max_distance=MAX_MATCH_DIST,
                                        max_missed=MAX_MISSED)
 
-        # 初始化機器人追蹤器
-        robot_mgr = RobotTrackerManager()
+        # 初始化機器人追蹤器（MOT 或 SOT）
+        robot_mgr = RobotTrackerManager(
+            detector=robot_detector, fps=self.fps)
+        tracking_mode = "MOT" if robot_mgr.use_mot else "SOT"
 
         # 初始化進球引擎
         engine = ScoringEngine(
@@ -1222,6 +1266,7 @@ class ScoringAnalyzer(ctk.CTk):
         total = self.total_frames
         frame_detections = {}
         robot_positions_cache = {}
+        robot_bboxes_cache = {}
 
         # ROI 裁切
         roi = self._roi
@@ -1232,13 +1277,21 @@ class ScoringAnalyzer(ctk.CTk):
             markers_by_frame.setdefault(mark_f, []).append(
                 (label, alliance, x, y, w, h))
 
+        # MOT 模式：預先註冊所有待匹配的標記（不需要影像）
+        if robot_mgr.use_mot:
+            for mark_f, markers in markers_by_frame.items():
+                for label, alliance, x, y, w, h in markers:
+                    robot_mgr.add_robot(label, (x, y, w, h), None,
+                                        mark_f, alliance)
+
         # 偵測函式選擇
-        def detect(frame):
+        def detect_balls(frame):
             if use_ai and ai_model is not None:
                 return detect_fuel_ai(frame, ai_model)
             return detect_yellow_balls(frame)
 
-        mode_label = "AI" if use_ai else "HSV"
+        ball_mode = "AI" if use_ai else "HSV"
+        mode_label = f"{ball_mode}+{tracking_mode}"
 
         # 逐幀處理
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -1252,21 +1305,24 @@ class ScoringAnalyzer(ctk.CTk):
                 rx, ry, rw, rh = roi
                 frame = frame[ry:ry+rh, rx:rx+rw]
 
-            # 初始化在此幀標記的機器人
-            if frame_idx in markers_by_frame:
+            # SOT 模式：在標記幀初始化追蹤器（需要影像）
+            if not robot_mgr.use_mot and frame_idx in markers_by_frame:
                 for label, alliance, x, y, w, h in markers_by_frame[frame_idx]:
-                    robot_mgr.add_robot(label, (x, y, w, h), frame,
-                                        frame_idx, alliance)
+                    robot_mgr.add_robot(
+                        label, (x, y, w, h), frame, frame_idx, alliance)
 
             # 球偵測+追蹤
-            dets = detect(frame)
+            dets = detect_balls(frame)
             frame_detections[frame_idx] = dets
             ball_positions = ball_tracker.update(dets, frame_idx)
 
             # 機器人追蹤
             robot_mgr.update_all(frame, frame_idx)
             robot_pos = robot_mgr.get_all_positions(frame_idx)
-            robot_positions_cache[frame_idx] = robot_mgr.get_all_display_positions(frame_idx)
+            robot_positions_cache[frame_idx] = \
+                robot_mgr.get_all_display_positions(frame_idx)
+            robot_bboxes_cache[frame_idx] = \
+                robot_mgr.get_all_bboxes(frame_idx)
 
             # 進球判定
             engine.process_frame(frame_idx, ball_positions, robot_pos,
@@ -1280,12 +1336,28 @@ class ScoringAnalyzer(ctk.CTk):
 
         cap.release()
 
+        # 後處理：位置插值（MOT 模式）
+        robot_mgr.interpolate_positions()
+        # 更新插值後的位置快取
+        if robot_mgr.use_mot:
+            for frame_idx in range(total):
+                pos = robot_mgr.get_all_display_positions(frame_idx)
+                if pos:
+                    robot_positions_cache[frame_idx] = pos
+                bbox = robot_mgr.get_all_bboxes(frame_idx)
+                if bbox:
+                    robot_bboxes_cache[frame_idx] = bbox
+
         # 軌跡縫合
         all_trajectories = stitch_trajectories(dict(ball_tracker.trajectories))
 
+        # 出手偵測後處理
+        engine.detect_shots(all_trajectories, robot_positions_cache)
+
         # 回到主線程
         self.after(0, lambda: self._finish_analysis(
-            all_trajectories, frame_detections, robot_positions_cache, engine
+            all_trajectories, frame_detections,
+            robot_positions_cache, robot_bboxes_cache, engine
         ))
 
     def _update_progress(self, pct, frame_idx, mode=""):
@@ -1301,11 +1373,13 @@ class ScoringAnalyzer(ctk.CTk):
         self.progress_bar.pack_forget()
         self._set_status(f"分析錯誤: {msg}", COLORS["error"])
 
-    def _finish_analysis(self, trajectories, frame_dets, robot_cache, engine):
+    def _finish_analysis(self, trajectories, frame_dets,
+                         robot_cache, robot_bbox_cache, engine):
         """分析完成，更新 UI。"""
         self._all_trajectories = trajectories
         self._frame_detections = frame_dets
         self._robot_positions_cache = robot_cache
+        self._robot_bboxes_cache = robot_bbox_cache
         self.scoring_engine = engine
         self._analysis_done = True
         self._analyzing = False
@@ -1319,10 +1393,11 @@ class ScoringAnalyzer(ctk.CTk):
         # 更新事件時間軸
         self._update_event_timeline()
 
-        n_events = len(engine.events)
+        n_goals = len(engine.events)
+        n_shots = len(engine.shot_events)
         n_robots = len(self._robot_markers)
         self._set_status(
-            f"分析完成！{n_events} 個進球事件，{n_robots} 台機器人",
+            f"分析完成！{n_goals} 進球, {n_shots} 出手, {n_robots} 台機器人",
             COLORS["success"])
 
         self._show_frame(self.current_frame)
@@ -1333,6 +1408,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._all_trajectories.clear()
         self._frame_detections.clear()
         self._robot_positions_cache.clear()
+        self._robot_bboxes_cache.clear()
         self.scoring_engine.reset()
 
         for item in self.score_tree.get_children():
@@ -1358,32 +1434,41 @@ class ScoringAnalyzer(ctk.CTk):
                     continue
                 if label in summary:
                     s = summary[label]
+                    acc_str = f"{s.accuracy:.0%}" if s.total_shots > 0 else "—"
                     self.score_tree.insert("", tk.END, values=(
-                        label, alliance_display, s.auto, s.teleop, s.total
+                        label, alliance_display,
+                        s.auto, s.teleop, s.total,
+                        s.total_shots, s.total_misses, acc_str
                     ))
                 else:
                     self.score_tree.insert("", tk.END, values=(
-                        label, alliance_display, 0, 0, 0
+                        label, alliance_display,
+                        0, 0, 0, 0, 0, "—"
                     ))
 
     def _update_event_timeline(self):
-        """更新事件時間軸。"""
+        """更新事件時間軸（進球 + 出手事件混合）。"""
         for item in self.event_tree.get_children():
             self.event_tree.delete(item)
 
-        timeline = self.scoring_engine.get_timeline()
-        for i, event in enumerate(timeline):
-            time_sec = event.frame_idx / self.fps
+        all_events = self.scoring_engine.get_all_events_timeline()
+        for i, evt in enumerate(all_events):
+            time_sec = evt["frame_idx"] / self.fps
             time_str = format_time(time_sec)
-            alliance_display = "紅" if event.alliance == "red" else \
-                               "藍" if event.alliance == "blue" else "—"
+            alliance_display = ("紅" if evt["alliance"] == "red" else
+                                "藍" if evt["alliance"] == "blue" else "—")
+            type_display = "進球" if evt["type"] == "goal" else "未進"
             self.event_tree.insert("", tk.END, iid=str(i), values=(
                 i + 1,
+                type_display,
                 f"{time_str} ({time_sec:.1f}s)",
-                event.period,
+                evt["period"],
                 alliance_display,
-                event.shooter_label,
+                evt["shooter"],
             ))
+
+        # 儲存事件列表供點擊跳轉使用
+        self._all_events_list = all_events
 
     def _on_event_click(self, event):
         """點擊事件時跳到對應幀。"""
@@ -1391,9 +1476,9 @@ class ScoringAnalyzer(ctk.CTk):
         if not sel:
             return
         idx = int(sel[0])
-        timeline = self.scoring_engine.get_timeline()
-        if 0 <= idx < len(timeline):
-            self._show_frame(timeline[idx].frame_idx)
+        events_list = getattr(self, '_all_events_list', [])
+        if 0 <= idx < len(events_list):
+            self._show_frame(events_list[idx]["frame_idx"])
 
     # ══════════════════════════════════════════════════════
     # CSV 匯出
@@ -1401,7 +1486,7 @@ class ScoringAnalyzer(ctk.CTk):
 
     def _export_csv(self):
         """匯出得分結果為 CSV。"""
-        if not self.scoring_engine.events:
+        if not self.scoring_engine.events and not self.scoring_engine.shot_events:
             messagebox.showinfo("提示", "沒有分析結果可匯出")
             return
 
@@ -1423,30 +1508,53 @@ class ScoringAnalyzer(ctk.CTk):
 
             # 得分摘要
             writer.writerow(["=== 得分摘要 ==="])
-            writer.writerow(["機器人", "聯盟", "Auto得分", "Teleop得分", "總計"])
+            writer.writerow(["機器人", "聯盟", "Auto進球", "Teleop進球",
+                             "總進球", "總出手", "未進球", "命中率"])
             summary = self.scoring_engine.get_summary()
             for label in sorted(summary.keys()):
                 s = summary[label]
                 alliance = self._get_robot_alliance(label)
-                alliance_display = "紅方" if alliance == "red" else \
-                                   "藍方" if alliance == "blue" else "—"
+                alliance_display = ("紅方" if alliance == "red" else
+                                    "藍方" if alliance == "blue" else "—")
+                acc_str = f"{s.accuracy:.1%}" if s.total_shots > 0 else "—"
                 writer.writerow([label, alliance_display,
-                                 s.auto, s.teleop, s.total])
+                                 s.auto_goals, s.teleop_goals, s.total,
+                                 s.total_shots, s.total_misses, acc_str])
             writer.writerow([])
 
-            # 事件詳細
+            # 進球事件
             writer.writerow(["=== 進球事件 ==="])
             writer.writerow(["編號", "幀", "時間(秒)", "期間", "聯盟",
-                             "射手", "射手距離"])
+                             "射手", "射手距離", "區域"])
             timeline = self.scoring_engine.get_timeline()
             for i, event in enumerate(timeline):
                 time_sec = event.frame_idx / self.fps
-                alliance_display = "紅方" if event.alliance == "red" else \
-                                   "藍方" if event.alliance == "blue" else "—"
+                alliance_display = ("紅方" if event.alliance == "red" else
+                                    "藍方" if event.alliance == "blue" else "—")
                 writer.writerow([
                     i + 1, event.frame_idx, f"{time_sec:.3f}",
                     event.period, alliance_display,
-                    event.shooter_label, f"{event.shooter_dist:.1f}"
+                    event.shooter_label, f"{event.shooter_dist:.1f}",
+                    event.zone_name
+                ])
+            writer.writerow([])
+
+            # 出手事件（含未進球）
+            writer.writerow(["=== 出手事件 ==="])
+            writer.writerow(["編號", "幀", "時間(秒)", "期間", "聯盟",
+                             "射手", "結果", "進球幀", "區域"])
+            shot_timeline = self.scoring_engine.get_shot_timeline()
+            for i, shot in enumerate(shot_timeline):
+                time_sec = shot.frame_idx / self.fps
+                alliance_display = ("紅方" if shot.alliance == "red" else
+                                    "藍方" if shot.alliance == "blue" else "—")
+                result_display = "進球" if shot.result == "goal" else "未進"
+                goal_f = str(shot.goal_frame) if shot.goal_frame >= 0 else "—"
+                writer.writerow([
+                    i + 1, shot.frame_idx, f"{time_sec:.3f}",
+                    shot.period, alliance_display,
+                    shot.shooter_label, result_display,
+                    goal_f, shot.zone_name
                 ])
 
         self._set_status(f"已匯出至 {Path(path).name}", COLORS["success"])

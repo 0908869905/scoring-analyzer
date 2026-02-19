@@ -23,6 +23,15 @@ env/
 
 # Models
 models/*.onnx
+models/*.pt
+*.pt
+
+# Training data & output
+datasets/
+runs/
+
+# Browser automation
+.playwright-mcp/
 
 # OS
 Thumbs.db
