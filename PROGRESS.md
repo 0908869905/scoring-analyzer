@@ -1,5 +1,32 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-02-19 (3)
+
+### 完成項目
+- [x] 資料集評估與切換 — 評估多個 Roboflow FRC 機器人偵測資料集，最終選定 **Main Robot Detection** (1,172 張, Red/Blue 底盤框選) 取代 WorBots 4145（類別為遊戲元素混雜，不夠乾淨）
+- [x] `train_robot_model.py` 更新 — 預設資料集從 WorBots 4145 (`worbots-4145/2024-frc/v8`) 改為 Main Robot Detection (`main-wcgiu/robot-detection-xru6m/v16`)
+- [x] `robot_detection.py` 類別過濾修復 — `is_robot_class()` 和 `infer_alliance()` 支援 "Red"/"Blue" 類別名（不只 "red_robot"），修復切換資料集後所有偵測結果被過濾掉的 bug
+- [x] `extract_frames.py` 新增 — 影片取幀工具，從比賽影片提取訓練用圖片，支援多影片、時間範圍、FPS 設定
+- [x] `TRAIN_README.txt` 新增 — GPU 訓練指南（給對方照著跑）
+- [x] `.gitignore` 更新 — 排除 datasets/、runs/、*.pt、.playwright-mcp/
+- [x] Git commit 完成 — push 失敗（尚未設定 remote repo）
+
+### 修改檔案
+- `train_robot_model.py` — 預設資料集改為 Main Robot Detection (main-wcgiu/robot-detection-xru6m/v16)
+- `robot_detection.py` — `is_robot_class()` 和 `infer_alliance()` 支援 "Red"/"Blue" 短類別名
+- `extract_frames.py` — **新建** — 影片取幀工具（多影片、時間範圍、FPS）
+- `TRAIN_README.txt` — **新建** — GPU 訓練步驟指南
+- `.gitignore` — 新增 datasets/、runs/、*.pt、.playwright-mcp/ 排除規則
+
+### 5-Question Reboot Check
+1. **做什麼？** 切換機器人偵測訓練資料集 + 修復類別過濾 + 準備 GPU 訓練環境
+2. **進度？** 訓練腳本、偵測器、取幀工具、訓練指南皆就緒，等待在 GPU 電腦上訓練
+3. **下一步？** 把專案複製到有 NVIDIA GPU 的電腦 → 按 `TRAIN_README.txt` 執行訓練 → 產出 `models/frc_robot.onnx` → 回到本機測試 MOT 模式端到端流程
+4. **阻礙？** 本機無 GPU（CPU 訓練 ~19 小時不實際）；`models/frc_robot.onnx` 尚未產出，MOT 模式無法使用；remote repo 尚未設定（push 失敗）
+5. **檔案？** `train_robot_model.py`（訓練腳本）、`robot_detection.py`（`is_robot_class` 類別過濾）、`TRAIN_README.txt`（GPU 訓練指南）、`extract_frames.py`（取幀工具）
+
+---
+
 ## Session: 2026-02-19 (2)
 
 ### 完成項目
@@ -173,4 +200,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-02-19 (2)*
+*Last updated: 2026-02-19 (3)*

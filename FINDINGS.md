@@ -183,4 +183,43 @@ WorBots 4145 資料集包含非機器人類別（note、speaker、display 等）
 - **預設過濾 vs 手動過濾**: `robot_only=True` 預設值確保不小心忘記過濾時仍然安全，需要全部偵測結果時可設為 `False`
 
 ---
+
+## 2026-02-19: 資料集切換 — WorBots 4145 → Main Robot Detection
+
+### 問題
+WorBots 4145 資料集 (3,291 張) 雖然資料量大，但類別混雜（red_robot/blue_robot/black_robot + note/speaker/display 等遊戲元素），需要額外過濾邏輯。且 "black_robot" 類別在實際 FRC 比賽中難以歸屬聯盟（紅方或藍方）。
+
+### 調研比較（更新）
+| 資料集 | 圖片數 | 類別 | 評估 |
+|--------|--------|------|------|
+| WorBots 4145 v8 | 3,291 | red_robot, blue_robot, black_robot, note, speaker, display | 類別混雜，black_robot 難歸屬聯盟 |
+| **Main Robot Detection v16** | 1,172 | Red, Blue | **最佳** — 純機器人底盤框選，類別乾淨直接對應聯盟 |
+| RF100-VL FSOD | 100 | Robot | 太小、version 1 不存在 |
+
+### 解決方案
+1. 將 `train_robot_model.py` 預設資料集改為 Main Robot Detection (`main-wcgiu/robot-detection-xru6m/v16`)
+2. `robot_detection.py` 的 `is_robot_class()` 和 `infer_alliance()` 更新，支援 "Red"/"Blue" 短類別名
+
+### 選擇理由
+- **類別乾淨**: 只有 Red/Blue 兩類，無需過濾遊戲元素，類別名直接對應聯盟
+- **底盤框選**: 標註聚焦在機器人底盤（最穩定可見的部分），比整機框選更一致
+- **資料量足夠**: 1,172 張對 2 類別的 YOLO 訓練已足夠收斂
+
+---
+
+## 2026-02-19: 類別過濾 Bug — 切換資料集導致所有偵測被過濾掉
+
+### 問題
+從 WorBots 4145 切換到 Main Robot Detection 後，`is_robot_class()` 無法辨識 "Red"/"Blue" 類別名（只認 "red_robot"/"blue_robot"），導致所有偵測結果被 `robot_only=True` 過濾掉，MOT 模式完全無輸出。
+
+### 原因
+`is_robot_class()` 原本只檢查類別名是否含 "robot" 或 "bot"，Main Robot Detection 的類別名是 "Red"/"Blue"（不含 "robot"），全部被判定為非機器人。
+
+### 解決方案
+更新 `is_robot_class()` 白名單邏輯：類別名含 "robot" 或 "bot"，**或完全等於** "red"/"blue"/"black"（不分大小寫），才算機器人。同步更新 `infer_alliance()` 支援 "Red"/"Blue" 短類別名直接推斷聯盟。
+
+### 預防
+切換訓練資料集時，必須同步檢查偵測器的類別過濾邏輯是否相容新資料集的類別名稱。
+
+---
 *Created: 2026-02-14*

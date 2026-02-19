@@ -49,7 +49,9 @@ scoring-analyzer/
 ├── app.py                 # CustomTkinter 主介面（ScoringAnalyzer 類別）
 ├── main.py                # 入口點
 ├── train_robot_model.py   # 機器人偵測模型訓練腳本（獨立工具）
+├── extract_frames.py      # 影片取幀工具（提取訓練用圖片）
 ├── models/                # ONNX 模型目錄（VitTrack + fuel + robot）
+├── TRAIN_README.txt       # GPU 訓練步驟指南
 ├── requirements.txt       # 依賴套件
 └── README.md              # 使用說明書
 ```
@@ -78,4 +80,4 @@ scoring-analyzer/
 開發過程中遇到錯誤，請記錄到 `errors.md`。
 
 ---
-*Last updated: 2026-02-19*
+*Last updated: 2026-02-19 (2)*
