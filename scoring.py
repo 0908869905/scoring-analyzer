@@ -9,27 +9,25 @@ from config import (
     SCORE_ZONE_DWELL_FRAMES, SCORE_COOLDOWN_FRAMES,
     AUTO_DURATION_SEC, TELEOP_START_SEC,
 )
-from geometry import point_in_rect, distance
+from geometry import point_in_polygon, distance
 
 
 @dataclass
 class ScoringZone:
-    """得分區域定義。"""
-    name: str       # "Upper HUB" 或 "Lower HUB"
-    x: int
-    y: int
-    w: int
-    h: int
+    """得分區域定義（多邊形）。"""
+    name: str                          # "紅方 Hub" / "藍方 Hub"
+    points: list[tuple[int, int]]      # 多邊形頂點 [(x1,y1), ...]
+    alliance: str = ""                 # "red" / "blue"
 
     def contains(self, px, py):
-        return point_in_rect(px, py, self.x, self.y, self.w, self.h)
+        return point_in_polygon(px, py, self.points)
 
     @property
     def center(self):
-        return (self.x + self.w / 2, self.y + self.h / 2)
-
-    def as_tuple(self):
-        return (self.x, self.y, self.w, self.h)
+        n = len(self.points)
+        cx = sum(p[0] for p in self.points) / n
+        cy = sum(p[1] for p in self.points) / n
+        return (cx, cy)
 
 
 @dataclass
@@ -37,40 +35,24 @@ class ScoreEvent:
     """進球事件。"""
     frame_idx: int
     ball_track_id: int
-    zone_name: str       # "Upper" 或 "Lower"
+    zone_name: str       # "紅方 Hub" / "藍方 Hub"
     shooter_label: str   # 機器人標籤，或 "未知"
     shooter_dist: float  # 射手距離
     period: str          # "Auto" 或 "Teleop"
+    alliance: str = ""   # "red" / "blue"
 
 
 @dataclass
 class RobotScore:
     """單一機器人的得分統計。"""
     label: str
-    auto_upper: int = 0
-    auto_lower: int = 0
-    teleop_upper: int = 0
-    teleop_lower: int = 0
-
-    @property
-    def auto_total(self):
-        return self.auto_upper + self.auto_lower
-
-    @property
-    def teleop_total(self):
-        return self.teleop_upper + self.teleop_lower
-
-    @property
-    def upper_total(self):
-        return self.auto_upper + self.teleop_upper
-
-    @property
-    def lower_total(self):
-        return self.auto_lower + self.teleop_lower
+    alliance: str = ""
+    auto: int = 0
+    teleop: int = 0
 
     @property
     def total(self):
-        return self.auto_upper + self.auto_lower + self.teleop_upper + self.teleop_lower
+        return self.auto + self.teleop
 
 
 class ScoringEngine:
@@ -91,9 +73,9 @@ class ScoringEngine:
         self._ball_in_zone = {}      # track_id -> set of zone_names currently in
         self._ball_cooldown = {}     # track_id -> cooldown_remaining
 
-    def add_zone(self, name, x, y, w, h):
-        """新增得分區域。"""
-        self.zones.append(ScoringZone(name, x, y, w, h))
+    def add_zone(self, name, points, alliance=""):
+        """新增得分區域（多邊形）。"""
+        self.zones.append(ScoringZone(name, points, alliance))
 
     def clear_zones(self):
         """清除所有得分區域。"""
@@ -167,19 +149,18 @@ class ScoringEngine:
                             ball_trajectories
                         )
                         period = self.get_period(frame_idx)
-                        zone_type = "Upper" if "upper" in zone.name.lower() \
-                            else "Lower"
 
                         event = ScoreEvent(
                             frame_idx=frame_idx,
                             ball_track_id=tid,
-                            zone_name=zone_type,
+                            zone_name=zone.name,
                             shooter_label=shooter,
                             shooter_dist=dist,
                             period=period,
+                            alliance=zone.alliance,
                         )
                         self.events.append(event)
-                        self._update_robot_score(shooter, zone_type, period)
+                        self._update_robot_score(shooter, period, zone.alliance)
 
                         # 設定冷卻
                         self._ball_cooldown[tid] = SCORE_COOLDOWN_FRAMES
@@ -263,22 +244,16 @@ class ScoringEngine:
 
         return (best_label, best_dist)
 
-    def _update_robot_score(self, label, zone_type, period):
+    def _update_robot_score(self, label, period, alliance=""):
         """更新機器人得分統計。"""
         if label not in self.robot_scores:
-            self.robot_scores[label] = RobotScore(label=label)
+            self.robot_scores[label] = RobotScore(label=label, alliance=alliance)
         score = self.robot_scores[label]
 
         if period == "Auto":
-            if zone_type == "Upper":
-                score.auto_upper += 1
-            else:
-                score.auto_lower += 1
+            score.auto += 1
         else:
-            if zone_type == "Upper":
-                score.teleop_upper += 1
-            else:
-                score.teleop_lower += 1
+            score.teleop += 1
 
     def get_summary(self):
         """取得所有機器人的得分摘要。"""

@@ -44,6 +44,27 @@ def point_in_rect(px, py, rx, ry, rw, rh):
     return rx <= px <= rx + rw and ry <= py <= ry + rh
 
 
+def point_in_polygon(px, py, polygon):
+    """
+    Ray casting 演算法判斷點 (px, py) 是否在多邊形內。
+
+    Args:
+        px, py: 點座標
+        polygon: [(x1, y1), (x2, y2), ...] 多邊形頂點列表
+    """
+    n = len(polygon)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > py) != (yj > py)) and \
+           (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
 def distance(p1, p2):
     """兩點間的歐幾里得距離。"""
     return math.hypot(p1[0] - p2[0], p1[1] - p2[1])

@@ -50,11 +50,19 @@ STITCH_AMBIGUITY_RATIO = 2.0 # 縫合歧義比率
 MIN_TRAJ_LEN = 5             # 最少軌跡點數
 
 # ── 機器人追蹤參數 ────────────────────────────────────
-ROBOT_SEARCH_MARGIN = 80     # CamShift 搜尋範圍擴展像素
-ROBOT_MIN_CONFIDENCE = 0.15  # 最低追蹤信心分數（反投影比率）
+ROBOT_TRACKER_TYPE = "VIT"   # 追蹤器類型（VIT → CSRT → KCF → MIL fallback）
 ROBOT_MAX_LOST_FRAMES = 30   # 最大丟失幀數
-ROBOT_HIST_BINS = 32         # 直方圖 bin 數量
 MAX_ROBOTS = 6               # 最多追蹤機器人數
+
+# ── AI 偵測模式 ─────────────────────────────────────
+DETECTION_MODE = "AI"               # "HSV" or "AI"（預設 AI）
+AI_CONFIDENCE_THRESHOLD = 0.25     # ONNX 本地推理：小數（0.25=25%）
+AI_MIN_AREA = 50
+AI_MAX_AREA = 200000
+
+# ── VitTrack 機器人追蹤 ────────────────────────────
+VITTRACK_MODEL_PATH = "models/object_tracking_vittrack_2023sep.onnx"
+VITTRACK_SCORE_THRESHOLD = 0.3
 
 # ── 進球判定參數 ──────────────────────────────────────
 SCORE_PROXIMITY_FRAMES = 15  # 回溯射手歸因的幀數
@@ -84,3 +92,17 @@ ROBOT_COLORS_HEX = [
     "#c800c8",
     "#00c8c8",
 ]
+
+# ── 聯盟配色 ─────────────────────────────────────────
+ALLIANCE_COLORS = {
+    "red": {
+        "bgr": (0, 0, 220),
+        "rgb": (220, 0, 0),
+        "hex": "#dc0000",
+    },
+    "blue": {
+        "bgr": (220, 100, 0),
+        "rgb": (0, 100, 220),
+        "hex": "#0064dc",
+    },
+}

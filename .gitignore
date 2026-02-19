@@ -21,6 +21,9 @@ env/
 .env
 .env.*
 
+# Models
+models/*.onnx
+
 # OS
 Thumbs.db
 Desktop.ini
