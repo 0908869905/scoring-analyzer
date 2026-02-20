@@ -1,5 +1,31 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-02-19 (4)
+
+### 完成項目
+- [x] 無用檔案清理 — 刪除 `models/fuel_yolov11.onnx`、`models/fuel_yolov11.pt`（球偵測 AI 模型，訓練資料是近距離但需求是廣角遠距，用戶決定棄用 AI 改用 HSV）、`fuel_yolov11/`（ultralytics 暫存）、`datasets/frc_robot/`（WorBots 4145 舊資料集）、`runs/`（訓練輸出）、`yolo11n.pt`（預訓練基底）
+- [x] 專案瘦身 — 從 ~370MB 降到 ~1.5MB，僅保留 `models/object_tracking_vittrack_2023sep.onnx` (698KB, SOT 追蹤用)
+- [x] 打包給對方訓練 — 建立 `scoring-analyzer-train.tar` (880KB)，排除 .git、__pycache__、.playwright-mcp、CLAUDE.md、PROGRESS.md、FINDINGS.md、errors.md
+- [x] Git commit — `chore: 清理無用模型與資料集，更新文件` (e60e08d)
+- [x] Push 嘗試 — 失敗（未設定 GitHub remote），用戶選擇直接複製資料夾給對方
+
+### 修改檔案
+- `models/fuel_yolov11.onnx` — **刪除**（球偵測 AI 模型，棄用）
+- `models/fuel_yolov11.pt` — **刪除**（YOLO 權重，棄用）
+- `fuel_yolov11/` — **刪除**（ultralytics 暫存目錄）
+- `datasets/frc_robot/` — **刪除**（WorBots 4145 舊資料集）
+- `runs/` — **刪除**（訓練輸出目錄）
+- `yolo11n.pt` — **刪除**（預訓練基底模型）
+
+### 5-Question Reboot Check
+1. **做什麼？** 清理無用模型與資料集，打包專案給 GPU 電腦訓練
+2. **進度？** 清理完成，打包檔已建立，等待對方在 GPU 電腦上訓練
+3. **下一步？** 把打包檔傳到有 NVIDIA GPU 的電腦 → 對方照 `TRAIN_README.txt` 執行訓練 → 訓練完帶回 `models/frc_robot.onnx` → 回到本機測試 MOT 模式端到端流程
+4. **阻礙？** 本機無 GPU；`models/frc_robot.onnx` 尚未產出，MOT 模式無法使用；GitHub remote 未設定
+5. **檔案？** `TRAIN_README.txt`（GPU 訓練指南）、`train_robot_model.py`（訓練腳本）、`robot_detection.py`（偵測器）、`models/object_tracking_vittrack_2023sep.onnx`（唯一保留的模型）
+
+---
+
 ## Session: 2026-02-19 (3)
 
 ### 完成項目
@@ -200,4 +226,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-02-19 (3)*
+*Last updated: 2026-02-19 (4)*

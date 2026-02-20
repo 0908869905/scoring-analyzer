@@ -24,6 +24,8 @@ from tracking import CentroidTracker, stitch_trajectories
 from robot_detection import load_robot_model
 from robot_tracker import RobotTrackerManager
 from scoring import ScoringEngine, ScoringZone
+from runtime_config import RuntimeConfig
+from settings_window import SettingsWindow
 from utils import load_font, format_time
 
 
@@ -97,6 +99,13 @@ class ScoringAnalyzer(ctk.CTk):
         # 偵測模式
         self._detection_mode = DETECTION_MODE  # "AI" or "HSV"
         self._ai_model = None  # 延遲載入
+
+        # 動態設定
+        self._runtime_config = RuntimeConfig()
+        self._settings_window = None
+        self._color_pick_mode = None
+        self._color_pick_callback = None
+        self._color_pick_finish = None
 
         # 分析引擎
         self.scoring_engine = ScoringEngine(fps=self.fps)
@@ -276,6 +285,15 @@ class ScoringAnalyzer(ctk.CTk):
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12),
             command=self._export_csv)
         self.export_btn.pack(side=tk.RIGHT, padx=(4, 8), pady=6)
+
+        self.settings_btn = ctk.CTkButton(
+            toolbar, text="設定", height=32, corner_radius=8,
+            fg_color="#a855f7",
+            hover_color="#9333ea",
+            text_color="white",
+            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12),
+            command=self._open_settings)
+        self.settings_btn.pack(side=tk.RIGHT, padx=(4, 4), pady=6)
 
         # ── 右側面板 ──
         right = ctk.CTkFrame(main, fg_color="transparent")
@@ -867,6 +885,10 @@ class ScoringAnalyzer(ctk.CTk):
 
     def _cancel_interaction(self):
         if self.interaction_mode:
+            if self.interaction_mode == "color_pick":
+                self._color_pick_callback = None
+                self._color_pick_finish = None
+                self._color_pick_mode = None
             self.interaction_mode = None
             self._drag_start = None
             self._drag_current = None
@@ -958,6 +980,20 @@ class ScoringAnalyzer(ctk.CTk):
         if not (0 <= vx < bw and 0 <= vy < bh):
             return
 
+        if self.interaction_mode == "color_pick":
+            vx_int, vy_int = int(vx), int(vy)
+            if self._color_pick_mode == "single":
+                if self._color_pick_callback:
+                    self._color_pick_callback(vx_int, vy_int)
+                self.interaction_mode = None
+                self.canvas.config(cursor="")
+                self._set_status("取色完成", COLORS["success"])
+            else:
+                if self._color_pick_callback:
+                    self._color_pick_callback(vx_int, vy_int)
+                self._show_frame(self.current_frame)
+            return
+
         if self.interaction_mode == "mark_zone_polygon":
             self._polygon_points.append((int(vx), int(vy)))
             n = len(self._polygon_points)
@@ -1015,7 +1051,15 @@ class ScoringAnalyzer(ctk.CTk):
             self._finish_mark_polygon()
 
     def _on_canvas_right_click(self, event):
-        """右鍵完成多邊形標記。"""
+        """右鍵完成多邊形標記 / 取色完成。"""
+        if self.interaction_mode == "color_pick" and self._color_pick_mode == "multi":
+            if self._color_pick_finish:
+                self._color_pick_finish()
+            self.interaction_mode = None
+            self.canvas.config(cursor="")
+            self._set_status("校正完成", COLORS["success"])
+            return
+
         if self.interaction_mode == "mark_zone_polygon":
             self._finish_mark_polygon()
 
@@ -1176,6 +1220,7 @@ class ScoringAnalyzer(ctk.CTk):
     def _on_detection_mode_change(self, value):
         """偵測模式切換回調。"""
         self._detection_mode = value
+        self._runtime_config.detection_mode = value
         self._ai_model = None  # 重置，分析時再載入
         mode_name = "AI 模型" if value == "AI" else "HSV 色彩過濾"
         self._set_status(f"偵測模式: {mode_name}", COLORS["info"])
@@ -1193,9 +1238,12 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 讀取 auto 時間設定
         try:
-            self.auto_duration = float(self.auto_entry.get())
+            auto_val = float(self.auto_entry.get())
+            self._runtime_config.auto_duration_sec = int(auto_val)
+            self._runtime_config.teleop_start_sec = int(auto_val)
+            self.auto_duration = auto_val
         except ValueError:
-            self.auto_duration = AUTO_DURATION_SEC
+            self.auto_duration = self._runtime_config.auto_duration_sec
 
         self._clear_analysis()
         self._analyzing = True
@@ -1215,7 +1263,8 @@ class ScoringAnalyzer(ctk.CTk):
             return
 
         # AI 球偵測模型載入（若選擇 AI 模式）
-        use_ai = self._detection_mode == "AI"
+        cfg = self._runtime_config
+        use_ai = cfg.detection_mode == "AI"
         ai_model = None
         if use_ai:
             try:
@@ -1247,8 +1296,8 @@ class ScoringAnalyzer(ctk.CTk):
                 "機器人偵測模型載入失敗，使用 SOT 追蹤", COLORS["error"]))
 
         # 初始化球追蹤器
-        ball_tracker = CentroidTracker(max_distance=MAX_MATCH_DIST,
-                                       max_missed=MAX_MISSED)
+        ball_tracker = CentroidTracker(max_distance=cfg.max_match_dist,
+                                       max_missed=cfg.max_missed)
 
         # 初始化機器人追蹤器（MOT 或 SOT）
         robot_mgr = RobotTrackerManager(
@@ -1258,8 +1307,14 @@ class ScoringAnalyzer(ctk.CTk):
         # 初始化進球引擎
         engine = ScoringEngine(
             fps=self.fps,
-            auto_sec=self.auto_duration,
-            teleop_start_sec=self.auto_duration
+            auto_sec=cfg.auto_duration_sec,
+            teleop_start_sec=cfg.teleop_start_sec,
+            proximity_frames=cfg.score_proximity_frames,
+            max_shooter_dist=cfg.score_max_shooter_dist,
+            zone_dwell_frames=cfg.score_zone_dwell_frames,
+            cooldown_frames=cfg.score_cooldown_frames,
+            shot_min_velocity=cfg.shot_min_velocity,
+            shot_robot_proximity=cfg.shot_robot_proximity,
         )
         engine.set_zones(self._scoring_zones)
 
@@ -1287,8 +1342,15 @@ class ScoringAnalyzer(ctk.CTk):
         # 偵測函式選擇
         def detect_balls(frame):
             if use_ai and ai_model is not None:
-                return detect_fuel_ai(frame, ai_model)
-            return detect_yellow_balls(frame)
+                return detect_fuel_ai(frame, ai_model,
+                                      confidence=cfg.ai_confidence,
+                                      min_area=cfg.ai_min_area,
+                                      max_area=cfg.ai_max_area)
+            return detect_yellow_balls(frame,
+                                       hsv_low=cfg.hsv_low,
+                                       hsv_high=cfg.hsv_high,
+                                       min_area=cfg.min_blob_area,
+                                       max_area=cfg.max_blob_area)
 
         ball_mode = "AI" if use_ai else "HSV"
         mode_label = f"{ball_mode}+{tracking_mode}"
@@ -1567,6 +1629,53 @@ class ScoringAnalyzer(ctk.CTk):
         self.status_label.configure(
             text=text,
             text_color=color or COLORS["text_secondary"])
+
+    # ══════════════════════════════════════════════════════
+    # 設定視窗
+    # ══════════════════════════════════════════════════════
+
+    def _open_settings(self):
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.focus()
+            return
+        self._settings_window = SettingsWindow(
+            self,
+            config=self._runtime_config,
+            get_current_frame=self._get_current_frame_for_preview,
+            on_config_changed=self._on_settings_changed)
+
+    def _get_current_frame_for_preview(self):
+        """提供當前播放幀給設定視窗預覽。"""
+        if not self.cap:
+            return None
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+        ret, frame = self.cap.read()
+        if ret:
+            if self._roi:
+                rx, ry, rw, rh = self._roi
+                frame = frame[ry:ry+rh, rx:rx+rw]
+            return frame
+        return None
+
+    def _on_settings_changed(self):
+        cfg = self._runtime_config
+        self._detection_mode = cfg.detection_mode
+        self._det_mode_var.set(cfg.detection_mode)
+        self.auto_duration = cfg.auto_duration_sec
+        self.auto_entry.delete(0, tk.END)
+        self.auto_entry.insert(0, str(cfg.auto_duration_sec))
+
+    # ══════════════════════════════════════════════════════
+    # 取色模式（供 SettingsWindow 呼叫）
+    # ══════════════════════════════════════════════════════
+
+    def _start_color_pick(self, mode="single", callback=None, finish_callback=None):
+        self._color_pick_mode = mode
+        self._color_pick_callback = callback
+        self._color_pick_finish = finish_callback
+        self.interaction_mode = "color_pick"
+        self.canvas.config(cursor="crosshair")
+        self._set_status("在影片上點擊取色位置", COLORS["info"])
 
     def destroy(self):
         self.is_playing = False

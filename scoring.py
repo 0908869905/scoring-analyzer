@@ -102,10 +102,22 @@ class ScoringEngine:
     """進球判定引擎。"""
 
     def __init__(self, fps=30.0, auto_sec=AUTO_DURATION_SEC,
-                 teleop_start_sec=TELEOP_START_SEC):
+                 teleop_start_sec=TELEOP_START_SEC,
+                 proximity_frames=SCORE_PROXIMITY_FRAMES,
+                 max_shooter_dist=SCORE_MAX_SHOOTER_DIST,
+                 zone_dwell_frames=SCORE_ZONE_DWELL_FRAMES,
+                 cooldown_frames=SCORE_COOLDOWN_FRAMES,
+                 shot_min_velocity=SHOT_MIN_VELOCITY,
+                 shot_robot_proximity=SHOT_ROBOT_PROXIMITY):
         self.fps = fps
         self.auto_end_frame = int(auto_sec * fps)
         self.teleop_start_frame = int(teleop_start_sec * fps)
+        self._proximity_frames = proximity_frames
+        self._max_shooter_dist = max_shooter_dist
+        self._zone_dwell_frames = zone_dwell_frames
+        self._cooldown_frames = cooldown_frames
+        self._shot_min_velocity = shot_min_velocity
+        self._shot_robot_proximity = shot_robot_proximity
 
         self.zones = []          # List[ScoringZone]
         self.events = []         # List[ScoreEvent]
@@ -180,7 +192,7 @@ class ScoringEngine:
                     if zone.name not in prev_zones:
                         self._ball_zone_frames[key] = 1
 
-                    if self._ball_zone_frames[key] == SCORE_ZONE_DWELL_FRAMES:
+                    if self._ball_zone_frames[key] == self._zone_dwell_frames:
                         shooter, dist = self._find_shooter(
                             tid, frame_idx, robot_positions,
                             ball_trajectories
@@ -198,7 +210,7 @@ class ScoringEngine:
                         )
                         self.events.append(event)
                         self._update_robot_goal(shooter, period, zone.alliance)
-                        self._ball_cooldown[tid] = SCORE_COOLDOWN_FRAMES
+                        self._ball_cooldown[tid] = self._cooldown_frames
                 else:
                     key = (tid, zone.name)
                     if key in self._ball_zone_frames:
@@ -242,7 +254,7 @@ class ScoringEngine:
             # 找出手點：速度突增 + 球在機器人附近
             shot_detected = False
             for i, vel in enumerate(velocities):
-                if vel < SHOT_MIN_VELOCITY:
+                if vel < self._shot_min_velocity:
                     continue
                 if shot_detected:
                     continue  # 同一軌跡只取第一次出手
@@ -272,7 +284,7 @@ class ScoringEngine:
                         best_dist = d
                         best_label = label
 
-                if best_dist > SHOT_ROBOT_PROXIMITY:
+                if best_dist > self._shot_robot_proximity:
                     continue  # 太遠，不算出手
 
                 # 取得射手聯盟
@@ -320,7 +332,7 @@ class ScoringEngine:
                                            ball_tid, frame_idx)
 
         traj = ball_trajectories[ball_tid]
-        lookback_start = max(0, frame_idx - SCORE_PROXIMITY_FRAMES)
+        lookback_start = max(0, frame_idx - self._proximity_frames)
         relevant_points = [
             (f, cx, cy) for f, cx, cy, *_ in traj
             if lookback_start <= f <= frame_idx
@@ -340,7 +352,7 @@ class ScoringEngine:
                     best_dist = d
                     best_label = label
 
-        if best_dist > SCORE_MAX_SHOOTER_DIST:
+        if best_dist > self._max_shooter_dist:
             return ("未知", best_dist)
         return (best_label, best_dist)
 
@@ -368,7 +380,7 @@ class ScoringEngine:
                 best_dist = d
                 best_label = label
 
-        if best_dist > SCORE_MAX_SHOOTER_DIST:
+        if best_dist > self._max_shooter_dist:
             return ("未知", best_dist)
         return (best_label, best_dist)
 

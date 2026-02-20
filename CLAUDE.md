@@ -38,7 +38,10 @@ python train_robot_model.py --api-key YOUR_ROBOFLOW_KEY
 
 ```
 scoring-analyzer/
-├── config.py              # 所有常數與設定（HSV、AI 偵測、ByteTrack、UI 配色）
+├── config.py              # 所有常數與預設值（HSV、AI 偵測、ByteTrack、UI 配色）
+├── runtime_config.py      # RuntimeConfig 動態參數容器 + Preset 系統
+├── calibration.py         # HSV 自動校正（K-Means 多點取色 + 單點取色 + 預覽生成）
+├── settings_window.py     # 設定視窗（CTkToplevel，6 Tab slider + HSV 即時預覽）
 ├── detection.py           # 球偵測（HSV + AI 雙模式，AI = YOLOv11 ONNX 本地推理）
 ├── tracking.py            # 球 CentroidTracker + 軌跡縫合
 ├── robot_detection.py     # 機器人偵測（YOLO ONNX，支援 NMS-Free 和傳統格式）
@@ -50,7 +53,9 @@ scoring-analyzer/
 ├── main.py                # 入口點
 ├── train_robot_model.py   # 機器人偵測模型訓練腳本（獨立工具）
 ├── extract_frames.py      # 影片取幀工具（提取訓練用圖片）
-├── models/                # ONNX 模型目錄（VitTrack + fuel + robot）
+├── models/                # ONNX 模型目錄（VitTrack SOT 追蹤 + robot 偵測待訓練）
+├── presets/               # Preset JSON 目錄（場地設定檔）
+│   └── 預設值.json         # 預設參數值
 ├── TRAIN_README.txt       # GPU 訓練步驟指南
 ├── requirements.txt       # 依賴套件
 └── README.md              # 使用說明書
@@ -80,4 +85,4 @@ scoring-analyzer/
 開發過程中遇到錯誤，請記錄到 `errors.md`。
 
 ---
-*Last updated: 2026-02-19 (2)*
+*Last updated: 2026-02-19 (4)*
