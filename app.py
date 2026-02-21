@@ -25,7 +25,7 @@ from robot_detection import load_robot_model
 from robot_tracker import RobotTrackerManager
 from scoring import ScoringEngine, ScoringZone
 from runtime_config import RuntimeConfig
-from settings_window import SettingsWindow
+from settings_window import SettingsPanel
 from utils import load_font, format_time
 
 
@@ -65,7 +65,9 @@ class ScoringAnalyzer(ctk.CTk):
         self.fps = 30.0
         self.current_frame = 0
         self.is_playing = False
-        self._playback_speed = 1.0     # 播放倍速（1.0 / 0.5）
+        self._playback_speed = 1.0     # 播放倍速
+        self._play_wall_start = 0.0    # 播放起始牆鐘時間
+        self._play_start_frame = 0     # 播放起始幀
         self.photo_image = None
         self.video_width = 0
         self.video_height = 0
@@ -102,7 +104,7 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 動態設定
         self._runtime_config = RuntimeConfig()
-        self._settings_window = None
+        self._settings_panel = None  # 在 _build_ui 中建立
         self._color_pick_mode = None
         self._color_pick_callback = None
         self._color_pick_finish = None
@@ -144,21 +146,63 @@ class ScoringAnalyzer(ctk.CTk):
         menubar.add_cascade(label="檔案", menu=file_menu)
         self.configure(menu=menubar)
 
-        # ── 主容器 ──
-        main = ctk.CTkFrame(self, fg_color="transparent")
-        main.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        main.columnconfigure(0, weight=7)
-        main.columnconfigure(1, weight=3)
-        main.rowconfigure(0, weight=1)
+        # ── 頂部狀態列（永遠可見）──
+        status_bar = ctk.CTkFrame(self, fg_color=COLORS["bg_card"],
+                                   corner_radius=8, height=36)
+        status_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        status_bar.pack_propagate(False)
 
-        # ── 左側：影片 ──
-        left = ctk.CTkFrame(main, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        left.rowconfigure(0, weight=1)
-        left.columnconfigure(0, weight=1)
+        self.status_label = ctk.CTkLabel(
+            status_bar, text="就緒 — 請開啟影片",
+            text_color=COLORS["text_secondary"],
+            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12))
+        self.status_label.pack(side=tk.LEFT, padx=10)
 
-        video_card = ctk.CTkFrame(left, fg_color=COLORS["bg_card"],
-                                   corner_radius=12)
+        ctk.CTkLabel(status_bar, text="機器人:",
+                      text_color=COLORS["text_secondary"],
+                      font=ctk.CTkFont(size=10)
+                      ).pack(side=tk.LEFT, padx=(16, 2))
+        self.robot_list_label = ctk.CTkLabel(
+            status_bar, text="（無）",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=10))
+        self.robot_list_label.pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkLabel(status_bar, text="區域:",
+                      text_color=COLORS["text_secondary"],
+                      font=ctk.CTkFont(size=10)
+                      ).pack(side=tk.LEFT, padx=(0, 2))
+        self.zone_list_label = ctk.CTkLabel(
+            status_bar, text="（無）",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=10))
+        self.zone_list_label.pack(side=tk.LEFT)
+
+        self.progress_bar = ctk.CTkProgressBar(
+            status_bar, progress_color=COLORS["accent"],
+            fg_color=COLORS["border"], corner_radius=4, height=6,
+            width=200)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(side=tk.RIGHT, padx=10)
+        self.progress_bar.pack_forget()
+
+        # ── 頂層分頁 ──
+        self.tabview = ctk.CTkTabview(
+            self, fg_color=COLORS["bg_card"], corner_radius=12,
+            segmented_button_fg_color=COLORS["border"],
+            segmented_button_selected_color=COLORS["accent"],
+            segmented_button_unselected_color=COLORS["bg_secondary"])
+        self.tabview.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+
+        # ════════════════════════════════════════════
+        # Tab 1: 影片分析
+        # ════════════════════════════════════════════
+        tab_video = self.tabview.add("影片分析")
+        tab_video.rowconfigure(0, weight=1)
+        tab_video.columnconfigure(0, weight=1)
+
+        video_card = ctk.CTkFrame(tab_video, fg_color=COLORS["bg_primary"],
+                                   corner_radius=8)
         video_card.grid(row=0, column=0, sticky="nsew")
         video_card.rowconfigure(0, weight=1)
         video_card.columnconfigure(0, weight=1)
@@ -173,9 +217,9 @@ class ScoringAnalyzer(ctk.CTk):
         self.canvas.bind("<ButtonPress-3>", self._on_canvas_right_click)
 
         # 播放控制列
-        playback = ctk.CTkFrame(left, fg_color=COLORS["bg_card"],
-                                 corner_radius=10)
-        playback.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        playback = ctk.CTkFrame(tab_video, fg_color=COLORS["bg_secondary"],
+                                 corner_radius=8)
+        playback.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         playback.columnconfigure(1, weight=1)
 
         self.play_btn = ctk.CTkButton(
@@ -217,8 +261,8 @@ class ScoringAnalyzer(ctk.CTk):
         self.fps_label.grid(row=0, column=4, padx=(0, 8))
 
         # 工具列
-        toolbar = ctk.CTkFrame(left, fg_color=COLORS["bg_card"],
-                                corner_radius=10)
+        toolbar = ctk.CTkFrame(tab_video, fg_color=COLORS["bg_secondary"],
+                                corner_radius=8)
         toolbar.grid(row=2, column=0, sticky="ew", pady=(4, 0))
 
         self.mark_robot_btn = ctk.CTkButton(
@@ -286,136 +330,49 @@ class ScoringAnalyzer(ctk.CTk):
             command=self._export_csv)
         self.export_btn.pack(side=tk.RIGHT, padx=(4, 8), pady=6)
 
-        self.settings_btn = ctk.CTkButton(
-            toolbar, text="設定", height=32, corner_radius=8,
-            fg_color="#a855f7",
-            hover_color="#9333ea",
-            text_color="white",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12),
-            command=self._open_settings)
-        self.settings_btn.pack(side=tk.RIGHT, padx=(4, 4), pady=6)
+        # ════════════════════════════════════════════
+        # Tab 2: 設定
+        # ════════════════════════════════════════════
+        tab_settings = self.tabview.add("設定")
+        tab_settings.rowconfigure(0, weight=1)
+        tab_settings.columnconfigure(0, weight=1)
 
-        # ── 右側面板 ──
-        right = ctk.CTkFrame(main, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        right.rowconfigure(1, weight=1)
-        right.columnconfigure(0, weight=1)
+        self._settings_panel = SettingsPanel(
+            tab_settings,
+            config=self._runtime_config,
+            get_current_frame=self._get_current_frame_for_preview,
+            on_config_changed=self._on_settings_changed,
+            start_color_pick=self._start_color_pick)
+        self._settings_panel.grid(row=0, column=0, sticky="nsew")
 
-        # 設定面板
-        settings_card = ctk.CTkFrame(right, fg_color=COLORS["bg_card"],
-                                      corner_radius=12)
-        settings_card.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        # ════════════════════════════════════════════
+        # Tab 3: 分析結果
+        # ════════════════════════════════════════════
+        tab_results = self.tabview.add("分析結果")
+        tab_results.rowconfigure(0, weight=1)
+        tab_results.columnconfigure(0, weight=1)
+        tab_results.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(settings_card, text="設定",
-                      text_color=COLORS["accent"],
-                      font=ctk.CTkFont(family="Microsoft JhengHei UI",
-                                        size=14, weight="bold")
-                      ).pack(anchor=tk.W, padx=12, pady=(12, 6))
-
-        # Auto 時間設定
-        auto_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
-        auto_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
-
-        ctk.CTkLabel(auto_frame, text="Auto 時長 (秒):",
-                      text_color=COLORS["text"],
-                      font=ctk.CTkFont(size=12)
-                      ).pack(side=tk.LEFT)
-
-        self.auto_entry = ctk.CTkEntry(
-            auto_frame, width=60, height=28,
-            fg_color=COLORS["bg_secondary"],
-            text_color=COLORS["text"],
-            border_color=COLORS["border"])
-        self.auto_entry.pack(side=tk.LEFT, padx=(6, 0))
-        self.auto_entry.insert(0, str(AUTO_DURATION_SEC))
-
-        # 偵測模式設定
-        det_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
-        det_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
-
-        ctk.CTkLabel(det_frame, text="Ball Detection:",
-                      text_color=COLORS["text"],
-                      font=ctk.CTkFont(size=12)
-                      ).pack(side=tk.LEFT)
-
-        self._det_mode_var = ctk.StringVar(value=self._detection_mode)
-        self.det_mode_menu = ctk.CTkOptionMenu(
-            det_frame, width=80, height=28,
-            values=["AI", "HSV"],
-            variable=self._det_mode_var,
-            fg_color=COLORS["bg_secondary"],
-            button_color=COLORS["border"],
-            button_hover_color=COLORS["border_hover"],
-            dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["border"],
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=12),
-            command=self._on_detection_mode_change)
-        self.det_mode_menu.pack(side=tk.LEFT, padx=(6, 0))
-
-        # 狀態
-        self.status_label = ctk.CTkLabel(
-            settings_card, text="就緒 — 請開啟影片",
-            text_color=COLORS["text_secondary"],
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12))
-        self.status_label.pack(anchor=tk.W, padx=12, pady=(4, 4))
-
-        self.progress_bar = ctk.CTkProgressBar(
-            settings_card, progress_color=COLORS["accent"],
-            fg_color=COLORS["border"], corner_radius=4, height=6)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill=tk.X, padx=12, pady=(0, 6))
-        self.progress_bar.pack_forget()
-
-        # 機器人列表
-        robot_list_card = ctk.CTkFrame(settings_card, fg_color="transparent")
-        robot_list_card.pack(fill=tk.X, padx=12, pady=(0, 12))
-
-        ctk.CTkLabel(robot_list_card, text="已標記機器人:",
-                      text_color=COLORS["text_secondary"],
-                      font=ctk.CTkFont(size=11)
-                      ).pack(anchor=tk.W)
-
-        self.robot_list_label = ctk.CTkLabel(
-            robot_list_card, text="（無）",
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=11), justify=tk.LEFT)
-        self.robot_list_label.pack(anchor=tk.W, padx=(8, 0))
-
-        # 得分區域列表
-        ctk.CTkLabel(robot_list_card, text="得分區域:",
-                      text_color=COLORS["text_secondary"],
-                      font=ctk.CTkFont(size=11)
-                      ).pack(anchor=tk.W, pady=(6, 0))
-
-        self.zone_list_label = ctk.CTkLabel(
-            robot_list_card, text="（無）",
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=11), justify=tk.LEFT)
-        self.zone_list_label.pack(anchor=tk.W, padx=(8, 0))
-
-        # ── 分頁面板 ──
-        self.tabview = ctk.CTkTabview(
-            right, fg_color=COLORS["bg_card"], corner_radius=12,
-            segmented_button_fg_color=COLORS["border"],
-            segmented_button_selected_color=COLORS["accent"],
-            segmented_button_unselected_color=COLORS["bg_secondary"])
-        self.tabview.grid(row=1, column=0, sticky="nsew")
-
-        # Tab 1: 得分統計
-        tab_score = self.tabview.add("得分統計")
-        tab_score.rowconfigure(0, weight=1)
-        tab_score.columnconfigure(0, weight=1)
-
-        score_tree_frame = ctk.CTkFrame(tab_score, fg_color="transparent")
-        score_tree_frame.grid(row=0, column=0, sticky="nsew")
-        score_tree_frame.rowconfigure(0, weight=1)
+        # 左半：得分統計
+        score_tree_frame = ctk.CTkFrame(tab_results, fg_color="transparent")
+        score_tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        score_tree_frame.rowconfigure(1, weight=1)
         score_tree_frame.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(score_tree_frame, text="得分統計",
+                      text_color=COLORS["accent"],
+                      font=ctk.CTkFont(size=14, weight="bold")
+                      ).grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
+
+        score_inner = ctk.CTkFrame(score_tree_frame, fg_color="transparent")
+        score_inner.grid(row=1, column=0, sticky="nsew")
+        score_inner.rowconfigure(0, weight=1)
+        score_inner.columnconfigure(0, weight=1)
 
         score_cols = ("robot", "alliance", "auto", "teleop", "total",
                       "shots", "miss", "acc")
         self.score_tree = ttk.Treeview(
-            score_tree_frame, columns=score_cols, show="headings",
+            score_inner, columns=score_cols, show="headings",
             style="Dark.Treeview")
         self.score_tree.heading("robot", text="機器人")
         self.score_tree.heading("alliance", text="聯盟")
@@ -425,34 +382,40 @@ class ScoringAnalyzer(ctk.CTk):
         self.score_tree.heading("shots", text="出手")
         self.score_tree.heading("miss", text="未進")
         self.score_tree.heading("acc", text="命中率")
-        self.score_tree.column("robot", width=60, anchor=tk.CENTER)
-        self.score_tree.column("alliance", width=35, anchor=tk.CENTER)
-        self.score_tree.column("auto", width=40, anchor=tk.CENTER)
-        self.score_tree.column("teleop", width=48, anchor=tk.CENTER)
-        self.score_tree.column("total", width=40, anchor=tk.CENTER)
-        self.score_tree.column("shots", width=40, anchor=tk.CENTER)
-        self.score_tree.column("miss", width=40, anchor=tk.CENTER)
-        self.score_tree.column("acc", width=48, anchor=tk.CENTER)
+        self.score_tree.column("robot", width=80, anchor=tk.CENTER)
+        self.score_tree.column("alliance", width=50, anchor=tk.CENTER)
+        self.score_tree.column("auto", width=50, anchor=tk.CENTER)
+        self.score_tree.column("teleop", width=60, anchor=tk.CENTER)
+        self.score_tree.column("total", width=50, anchor=tk.CENTER)
+        self.score_tree.column("shots", width=50, anchor=tk.CENTER)
+        self.score_tree.column("miss", width=50, anchor=tk.CENTER)
+        self.score_tree.column("acc", width=60, anchor=tk.CENTER)
 
-        score_scroll = ttk.Scrollbar(score_tree_frame, orient=tk.VERTICAL,
+        score_scroll = ttk.Scrollbar(score_inner, orient=tk.VERTICAL,
                                       command=self.score_tree.yview)
         self.score_tree.configure(yscrollcommand=score_scroll.set)
         self.score_tree.grid(row=0, column=0, sticky="nsew")
         score_scroll.grid(row=0, column=1, sticky="ns")
 
-        # Tab 2: 進球事件
-        tab_events = self.tabview.add("進球事件")
-        tab_events.rowconfigure(0, weight=1)
-        tab_events.columnconfigure(0, weight=1)
-
-        event_tree_frame = ctk.CTkFrame(tab_events, fg_color="transparent")
-        event_tree_frame.grid(row=0, column=0, sticky="nsew")
-        event_tree_frame.rowconfigure(0, weight=1)
+        # 右半：進球事件
+        event_tree_frame = ctk.CTkFrame(tab_results, fg_color="transparent")
+        event_tree_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        event_tree_frame.rowconfigure(1, weight=1)
         event_tree_frame.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(event_tree_frame, text="進球事件",
+                      text_color=COLORS["accent"],
+                      font=ctk.CTkFont(size=14, weight="bold")
+                      ).grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
+
+        event_inner = ctk.CTkFrame(event_tree_frame, fg_color="transparent")
+        event_inner.grid(row=1, column=0, sticky="nsew")
+        event_inner.rowconfigure(0, weight=1)
+        event_inner.columnconfigure(0, weight=1)
 
         ecols = ("idx", "type", "time", "period", "alliance", "shooter")
         self.event_tree = ttk.Treeview(
-            event_tree_frame, columns=ecols, show="headings",
+            event_inner, columns=ecols, show="headings",
             style="Dark.Treeview")
         self.event_tree.heading("idx", text="#")
         self.event_tree.heading("type", text="類型")
@@ -460,14 +423,14 @@ class ScoringAnalyzer(ctk.CTk):
         self.event_tree.heading("period", text="期間")
         self.event_tree.heading("alliance", text="聯盟")
         self.event_tree.heading("shooter", text="射手")
-        self.event_tree.column("idx", width=28, anchor=tk.CENTER)
-        self.event_tree.column("type", width=40, anchor=tk.CENTER)
-        self.event_tree.column("time", width=75, anchor=tk.CENTER)
-        self.event_tree.column("period", width=50, anchor=tk.CENTER)
-        self.event_tree.column("alliance", width=35, anchor=tk.CENTER)
-        self.event_tree.column("shooter", width=55, anchor=tk.CENTER)
+        self.event_tree.column("idx", width=40, anchor=tk.CENTER)
+        self.event_tree.column("type", width=60, anchor=tk.CENTER)
+        self.event_tree.column("time", width=90, anchor=tk.CENTER)
+        self.event_tree.column("period", width=60, anchor=tk.CENTER)
+        self.event_tree.column("alliance", width=50, anchor=tk.CENTER)
+        self.event_tree.column("shooter", width=80, anchor=tk.CENTER)
 
-        event_scroll = ttk.Scrollbar(event_tree_frame, orient=tk.VERTICAL,
+        event_scroll = ttk.Scrollbar(event_inner, orient=tk.VERTICAL,
                                       command=self.event_tree.yview)
         self.event_tree.configure(yscrollcommand=event_scroll.set)
         self.event_tree.grid(row=0, column=0, sticky="nsew")
@@ -562,6 +525,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._show_frame(0)
 
     def _show_frame(self, frame_idx):
+        """跳轉到指定幀並渲染（用於 slider、手動跳轉）。"""
         if not self.cap:
             return
         frame_idx = max(0, min(frame_idx, self.total_frames - 1))
@@ -569,9 +533,11 @@ class ScoringAnalyzer(ctk.CTk):
         ret, frame = self.cap.read()
         if not ret:
             return
-
         self.current_frame = frame_idx
+        self._render_frame(frame, frame_idx)
 
+    def _render_frame(self, frame, frame_idx):
+        """將已解碼的影格渲染到畫布（不含 seek）。"""
         # ROI 裁切
         if self._roi:
             rx, ry, rw, rh = self._roi
@@ -681,6 +647,71 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 分析後的文字標籤
         if self._analysis_done:
+            self._draw_analysis_labels(draw, frame_idx, scale)
+
+        self.photo_image = ImageTk.PhotoImage(pil_img)
+        self.canvas.delete("all")
+        self.canvas.create_image(self._display_offset_x,
+                                 self._display_offset_y,
+                                 anchor=tk.NW, image=self.photo_image)
+
+        self.frame_label.configure(
+            text=f"幀: {frame_idx}/{self.total_frames - 1}  |  "
+                 f"{time_sec:.3f}s")
+        self.slider.set(frame_idx)
+
+    def _render_frame_playback(self, frame, frame_idx):
+        """播放專用快速渲染：INTER_LINEAR + 精簡 overlay。"""
+        if self._roi:
+            rx, ry, rw, rh = self._roi
+            frame = frame[ry:ry+rh, rx:rx+rw]
+
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            cw, ch = 900, 600
+
+        fh, fw = frame.shape[:2]
+        scale = min(cw / fw, ch / fh)
+        new_w, new_h = int(fw * scale), int(fh * scale)
+        self._display_scale = scale
+        self._display_offset_x = (cw - new_w) // 2
+        self._display_offset_y = (ch - new_h) // 2
+
+        # 播放時一律用 LINEAR（比 LANCZOS4 快 12 倍）
+        resized = cv2.resize(frame, (new_w, new_h),
+                             interpolation=cv2.INTER_LINEAR)
+
+        # 得分區域多邊形
+        for zone in self._scoring_zones:
+            pts = [self._video_to_resized(p, scale) for p in zone.points]
+            pts_np = np.array(pts, dtype=np.int32)
+            if zone.alliance in ALLIANCE_COLORS:
+                zone_color = ALLIANCE_COLORS[zone.alliance]["bgr"]
+            else:
+                zone_color = (200, 100, 255)
+            cv2.polylines(resized, [pts_np], isClosed=True,
+                          color=zone_color, thickness=2,
+                          lineType=cv2.LINE_AA)
+
+        # 分析 overlay（球偵測、軌跡、機器人框）
+        if self._analysis_done:
+            self._draw_analysis_overlay(resized, frame_idx, scale)
+
+        # BGR → RGB → Tk（跳過 PIL Draw，直接用 cv2.putText）
+        time_sec = frame_idx / self.fps
+        period = "Auto" if time_sec < self.auto_duration else "Teleop"
+        overlay_text = f"Frame {frame_idx} | {time_sec:.1f}s | {period}"
+        cv2.putText(resized, overlay_text, (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (245, 158, 11), 1,
+                    cv2.LINE_AA)
+
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+
+        # 分析後的文字標籤（機器人名稱等，需要中文字型）
+        if self._analysis_done:
+            draw = ImageDraw.Draw(pil_img)
             self._draw_analysis_labels(draw, frame_idx, scale)
 
         self.photo_image = ImageTk.PhotoImage(pil_img)
@@ -824,18 +855,25 @@ class ScoringAnalyzer(ctk.CTk):
         self.is_playing = not self.is_playing
         if self.is_playing:
             self.play_btn.configure(text="⏸ 暫停")
+            self._play_wall_start = time.monotonic()
+            self._play_start_frame = self.current_frame
             self._play_loop()
         else:
             self.play_btn.configure(text="▶ 播放")
 
     def _toggle_speed(self):
-        """切換播放倍速 1x ↔ 0.5x。"""
-        if self._playback_speed == 1.0:
-            self._playback_speed = 0.5
-            self.speed_btn.configure(text="0.5x")
-        else:
+        """切換播放倍速 1x → 2x → 3x → 4x → 5x → 1x。"""
+        speeds = [1.0, 2.0, 3.0, 4.0, 5.0]
+        try:
+            idx = speeds.index(self._playback_speed)
+            self._playback_speed = speeds[(idx + 1) % len(speeds)]
+        except ValueError:
             self._playback_speed = 1.0
-            self.speed_btn.configure(text="1x")
+        # 重置時間基準，避免切速後瞬間跳幀
+        self._play_wall_start = time.monotonic()
+        self._play_start_frame = self.current_frame
+        label = f"{int(self._playback_speed)}x"
+        self.speed_btn.configure(text=label)
 
     def _play_loop(self):
         if not self.is_playing or not self.cap:
@@ -845,13 +883,36 @@ class ScoringAnalyzer(ctk.CTk):
             self.play_btn.configure(text="▶ 播放")
             return
 
-        t0 = time.monotonic()
-        self._show_frame(self.current_frame + 1)
-        render_ms = (time.monotonic() - t0) * 1000
+        t_start = time.monotonic()
 
-        # 每幀目標間隔（ms）— 扣除渲染時間
-        frame_ms = 1000.0 / (self.fps * self._playback_speed)
-        delay = max(1, int(frame_ms - render_ms))
+        # 根據牆鐘時間計算目標幀
+        elapsed = t_start - self._play_wall_start
+        target = self._play_start_frame + int(
+            elapsed * self.fps * self._playback_speed)
+        target = min(target, self.total_frames - 1)
+
+        if target > self.current_frame:
+            gap = target - self.current_frame
+            if gap == 1:
+                # 下一幀：直接讀取
+                ret, frame = self.cap.read()
+            elif gap <= 5:
+                # 小間距：grab 跳過中間幀，只讀最後一幀
+                for _ in range(gap - 1):
+                    self.cap.grab()
+                ret, frame = self.cap.read()
+            else:
+                # 大間距：直接 seek（避免逐幀 grab 太慢）
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                ret, frame = self.cap.read()
+
+            if ret and frame is not None:
+                self.current_frame = target
+                self._render_frame_playback(frame, target)
+
+        # 固定 ~30fps 顯示率，扣除本次渲染耗時
+        render_ms = (time.monotonic() - t_start) * 1000
+        delay = max(1, int(33 - render_ms))
         self.after(delay, self._play_loop)
 
     # ══════════════════════════════════════════════════════
@@ -1222,8 +1283,6 @@ class ScoringAnalyzer(ctk.CTk):
         self._detection_mode = value
         self._runtime_config.detection_mode = value
         self._ai_model = None  # 重置，分析時再載入
-        mode_name = "AI 模型" if value == "AI" else "HSV 色彩過濾"
-        self._set_status(f"偵測模式: {mode_name}", COLORS["info"])
 
     def _on_analyze(self):
         if not self.cap:
@@ -1236,14 +1295,8 @@ class ScoringAnalyzer(ctk.CTk):
             self._set_status("分析進行中...", COLORS["accent"])
             return
 
-        # 讀取 auto 時間設定
-        try:
-            auto_val = float(self.auto_entry.get())
-            self._runtime_config.auto_duration_sec = int(auto_val)
-            self._runtime_config.teleop_start_sec = int(auto_val)
-            self.auto_duration = auto_val
-        except ValueError:
-            self.auto_duration = self._runtime_config.auto_duration_sec
+        # 從 RuntimeConfig 讀取 auto 時間設定
+        self.auto_duration = self._runtime_config.auto_duration_sec
 
         self._clear_analysis()
         self._analyzing = True
@@ -1634,16 +1687,6 @@ class ScoringAnalyzer(ctk.CTk):
     # 設定視窗
     # ══════════════════════════════════════════════════════
 
-    def _open_settings(self):
-        if self._settings_window is not None and self._settings_window.winfo_exists():
-            self._settings_window.focus()
-            return
-        self._settings_window = SettingsWindow(
-            self,
-            config=self._runtime_config,
-            get_current_frame=self._get_current_frame_for_preview,
-            on_config_changed=self._on_settings_changed)
-
     def _get_current_frame_for_preview(self):
         """提供當前播放幀給設定視窗預覽。"""
         if not self.cap:
@@ -1660,10 +1703,8 @@ class ScoringAnalyzer(ctk.CTk):
     def _on_settings_changed(self):
         cfg = self._runtime_config
         self._detection_mode = cfg.detection_mode
-        self._det_mode_var.set(cfg.detection_mode)
+        self._ai_model = None  # 偵測模式可能已變更，重置
         self.auto_duration = cfg.auto_duration_sec
-        self.auto_entry.delete(0, tk.END)
-        self.auto_entry.insert(0, str(cfg.auto_duration_sec))
 
     # ══════════════════════════════════════════════════════
     # 取色模式（供 SettingsWindow 呼叫）
