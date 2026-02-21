@@ -240,4 +240,99 @@ WorBots 4145 資料集 (3,291 張) 雖然資料量大，但類別混雜（red_ro
 - **瘦身效果顯著**: 刪除模型後專案從 ~370MB 降到 ~1.5MB
 
 ---
+
+## 2026-02-20: 4K HEVC 60fps 播放瓶頸分析與優化
+
+### 問題
+影片為 4K (3840x2160) HEVC 60fps，播放時卡頓嚴重，連 1x 速度都無法流暢播放。
+
+### 原因（兩個瓶頸）
+1. **解碼瓶頸**: OpenCV VideoCapture 對 HEVC 4K 影片的 `cap.read()` 只有 ~26fps，而影片是 60fps，連 1x 播放都不夠快
+2. **縮放瓶頸**: `cv2.resize` 使用 LANCZOS4 插值將 4K 縮放到顯示尺寸，每幀耗時 ~14ms
+
+### 解決方案
+
+#### 1. `_show_frame` 拆分為 `_show_frame` + `_render_frame`
+- `_show_frame` 負責 seek + read（取得幀資料）
+- `_render_frame` 負責渲染（縮放 + overlay + 顯示）
+- 播放時使用順序 `cap.read()` 而非每幀 `cap.set(CAP_PROP_POS_FRAMES)` seek
+
+#### 2. `_render_frame_playback` 快速渲染路徑
+播放專用的精簡渲染，三個關鍵優化：
+- **INTER_LINEAR 取代 LANCZOS4**: 從 14ms 降到 0.04ms（快 ~350 倍），視覺差異在播放中不可察覺
+- **cv2.putText 取代 PIL ImageDraw**: 省去 NumPy→PIL→NumPy 來回轉換的開銷
+- **精簡 overlay**: 播放時只繪製必要資訊，省去暫停時才需要的詳細標註
+
+#### 3. `_play_loop` 重寫
+- **固定 30fps 顯示率**: 不管影片原始幀率（60fps），顯示端最多 30fps，每次跳 2 幀（speed=1x 時）
+- **grab() 跳過中間幀**: 小間距（<10 幀）用 `cap.grab()` 逐幀推進（~35fps，比 read 的 26fps 快），只在目標幀才 `cap.retrieve()`
+- **大間距用 seek**: 需跳過 >10 幀時才用 `cap.set(CAP_PROP_POS_FRAMES)` seek
+
+### 關鍵發現
+| 指標 | 優化前 | 優化後 | 改善 |
+|------|--------|--------|------|
+| resize 插值 | LANCZOS4 (14ms) | INTER_LINEAR (0.04ms) | ~350x |
+| 文字繪製 | PIL ImageDraw | cv2.putText | 省去格式轉換 |
+| 跳幀方式 | 每幀 seek | grab() 順序推進 | ~35fps vs seek 延遲 |
+| 顯示幀率 | 跟原始 fps (60) | 固定 30fps | 渲染壓力減半 |
+| `cap.grab()` vs `cap.read()` | — | 35fps vs 26fps | grab 快 35% |
+| `cap.set(CAP_PROP_POS_FRAMES)` | 用於每幀 | 僅大跳躍 | 壓縮影片 seek 很慢 |
+
+### 選擇理由
+- **INTER_LINEAR vs LANCZOS4**: LANCZOS4 適合靜態圖片放大（銳利邊緣），但播放時每幀只顯示 33ms，肉眼無法分辨差異，LINEAR 的速度優勢遠大於畫質損失
+- **30fps 顯示率**: 人眼對 30fps 以上的流暢度感知差異很小，固定 30fps 可將解碼壓力減半且確保穩定
+- **grab() vs seek**: 對壓縮影片（HEVC/H.264），seek 需要找到最近的 I-frame 再解碼到目標幀，非常慢；順序 grab() 只做解封裝（demux）不做解碼，適合跳過少量幀
+- **暫停時仍用 LANCZOS4**: 暫停時用戶會仔細觀察畫面，此時不需要速度，用高品質渲染
+
+---
+
+## 2026-02-21: GCP 抵免額對 FRC Scoring Analyzer 的價值評估
+
+### 問題
+用戶有兩筆 Google Cloud 抵免額：Free Trial (7000 TWD) 和 GenAI App Builder (30000 TWD)，需要評估對本專案是否有用。
+
+### 調研比較
+| GCP 服務 | 費用 | 對本專案價值 | 評估 |
+|----------|------|-------------|------|
+| Compute Engine GPU (T4) | ~$0.54/hr (~17 TWD/hr) | 訓練機器人偵測模型 | 可用，但 Colab 免費 T4 已足夠 |
+| Gemini Vision API | ~$0.002/張 | 球/機器人偵測 | 比 HSV+YOLO 本地方案慢且貴，需網路 |
+| Video Intelligence API | 按分鐘計費 | 物件追蹤 | 泛用模型不認 FRC 物件，精度不如專用 YOLO |
+| GenAI App Builder (30000 TWD) | — | 無 | 僅涵蓋 Vertex AI Search & Conversation，與視覺分析無關 |
+
+### 結論
+- **唯一值得做的事：GPU 訓練模型**，但 Google Colab 免費 T4 已能完成（實測約 30 分鐘訓完）
+- **GenAI App Builder 的 30000 TWD 完全無用** — 只涵蓋搜尋和對話 AI，不涵蓋任何視覺 API
+- **GCP 視覺 API 全部不如現有方案** — 本專案需要離線、即時、專用模型，雲端泛用 API 在每個維度都輸
+
+### 選擇理由
+- **Colab vs GCP Compute Engine**: Colab 免費提供 T4 GPU，設定簡單，對一次性訓練任務完全足夠，不需要花 GCP 額度
+- **本地 ONNX vs 雲端 API**: 本地推理 ~50ms/幀（CPU），離線可用，無 API 成本；雲端 API 有延遲、需網路、按量計費
+
+---
+
+## 2026-02-21: 使用 Google Colab 免費 T4 GPU 訓練 YOLO 模型
+
+### 問題
+本機無 NVIDIA GPU，CPU 訓練 YOLOv11n 需要 ~19 小時，不實際。之前計畫借 GPU 電腦或用 GCP，但都有門檻。
+
+### 解決方案
+建立 `train_colab.ipynb` 在 Google Colab 免費 T4 GPU 上訓練：
+1. 安裝 ultralytics + roboflow
+2. 從 Roboflow 下載 Main Robot Detection v16 資料集 (1,172 張, Red/Blue)
+3. YOLOv11n 訓練 100 epochs（實測 T4 約 30 分鐘完成）
+4. 匯出 ONNX (opset=12, simplify=True, imgsz=640)
+5. 下載 `frc_robot.onnx` 到本機 `models/` 目錄
+
+### 訓練結果
+- 模型大小：10.1 MB
+- 類別：['Blue', 'Red']
+- 輸入：640x640
+- 推理驗證：本機 onnxruntime CPU 推理正常
+
+### 選擇理由
+- **Colab vs GCP VM**: Colab 零設定、免費、自帶 T4 GPU；GCP 需設定 VM、安裝 driver、可能遇 quota 問題
+- **notebook 加入 .gitignore**: 含 Roboflow API key，不可提交到 git
+- **opset=12 + simplify**: 確保與 onnxruntime 1.17+ 的最大相容性
+
+---
 *Created: 2026-02-14*

@@ -41,7 +41,7 @@ scoring-analyzer/
 ├── config.py              # 所有常數與預設值（HSV、AI 偵測、ByteTrack、UI 配色）
 ├── runtime_config.py      # RuntimeConfig 動態參數容器 + Preset 系統
 ├── calibration.py         # HSV 自動校正（K-Means 多點取色 + 單點取色 + 預覽生成）
-├── settings_window.py     # 設定視窗（CTkToplevel，6 Tab slider + HSV 即時預覽）
+├── settings_window.py     # 設定面板（SettingsPanel 嵌入式，分頁 slider + HSV 即時預覽）
 ├── detection.py           # 球偵測（HSV + AI 雙模式，AI = YOLOv11 ONNX 本地推理）
 ├── tracking.py            # 球 CentroidTracker + 軌跡縫合
 ├── robot_detection.py     # 機器人偵測（YOLO ONNX，支援 NMS-Free 和傳統格式）
@@ -53,7 +53,8 @@ scoring-analyzer/
 ├── main.py                # 入口點
 ├── train_robot_model.py   # 機器人偵測模型訓練腳本（獨立工具）
 ├── extract_frames.py      # 影片取幀工具（提取訓練用圖片）
-├── models/                # ONNX 模型目錄（VitTrack SOT 追蹤 + robot 偵測待訓練）
+├── train_colab.ipynb      # Google Colab 訓練 notebook（免費 T4 GPU，不提交 git）
+├── models/                # ONNX 模型目錄（VitTrack SOT 追蹤 + frc_robot 機器人偵測）
 ├── presets/               # Preset JSON 目錄（場地設定檔）
 │   └── 預設值.json         # 預設參數值
 ├── TRAIN_README.txt       # GPU 訓練步驟指南
@@ -72,7 +73,11 @@ scoring-analyzer/
    - **SOT 模式** (備用): VitTrack/CSRT 單目標追蹤 + 模板匹配恢復
 4. **進球判定**: 球進入 Hub 多邊形區域（ray casting）→ 停留 N 幀確認 → 回溯軌跡找最近機器人歸因
 5. **出手偵測**: 速度突增 + 機器人鄰近度 → 追蹤進球/未進 → 命中率統計
-6. **播放系統**: 牆鐘時間基準 → `time.monotonic()` + 落後追趕 → 1x/0.5x 速度
+6. **播放系統**: 牆鐘時間基準 → 固定 30fps 顯示率 → grab() 跳幀 + seek 大跳躍 → 1-5x 速度
+   - `_show_frame`: seek + read（暫停/拖曳用）
+   - `_render_frame`: LANCZOS4 高品質渲染（暫停時）
+   - `_render_frame_playback`: INTER_LINEAR 快速渲染 + cv2.putText（播放時）
+   - `_play_loop`: 30fps 顯示率 + grab() 跳幀 + 大間距 seek
 
 ## Code Style
 
@@ -85,4 +90,4 @@ scoring-analyzer/
 開發過程中遇到錯誤，請記錄到 `errors.md`。
 
 ---
-*Last updated: 2026-02-19 (4)*
+*Last updated: 2026-02-21*

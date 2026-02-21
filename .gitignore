@@ -29,6 +29,7 @@ models/*.pt
 # Training data & output
 datasets/
 runs/
+train_colab.ipynb
 
 # Browser automation
 .playwright-mcp/

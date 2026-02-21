@@ -1,5 +1,58 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-02-21
+
+### 完成項目
+- [x] GCP 抵免額用途研究 — 評估 Google Cloud Free Trial (7000 TWD) 和 GenAI App Builder (30000 TWD) 對本專案的價值
+  - GCP Free Trial：可用於 GPU 訓練（T4 ~$0.54/hr），但 Colab 免費 T4 已足夠
+  - GenAI App Builder (30000 TWD)：僅涵蓋 Vertex AI Search & Conversation，對本專案無用
+  - Gemini Vision API / Video Intelligence API：比現有 HSV+YOLO 方案差，不值得用
+  - 結論：只有 GPU 訓練值得做，且 Colab 免費 T4 已能完成
+- [x] 建立 Colab 訓練 Notebook (`train_colab.ipynb`) — 在 Google Colab 免費 T4 GPU 上訓練 YOLOv11n 機器人偵測模型
+  - 資料集：Main Robot Detection (1,172 張, Red/Blue 兩類)
+  - 已加入 `.gitignore`（含 Roboflow API key）
+- [x] 設定 gcloud CLI — 安裝、登入 (redacted@example.com)、設定專案 frc-project-484514、啟用 Compute Engine API、確認 GPU quota=1
+- [x] **模型訓練完成** — 用戶在 Colab T4 GPU 完成訓練，產出 `frc_robot.onnx` (10.1 MB)
+  - 類別：['Blue', 'Red']，輸入 640x640
+  - 複製到 `models/frc_robot.onnx`，推理驗證通過
+  - **解決了專案 #1 blocker：MOT 模式（YOLO + ByteTrack）現在可用**
+
+### 修改檔案
+- `train_colab.ipynb` — **新建** — Google Colab 訓練 notebook（Roboflow 下載 → YOLOv11n 訓練 → ONNX 匯出 → 下載）
+- `.gitignore` — 新增 `train_colab.ipynb` 排除規則（含 API key 不可提交）
+- `models/frc_robot.onnx` — **新增** — 訓練好的機器人偵測模型 (10.1 MB, Blue/Red, 640x640)
+
+### 5-Question Reboot Check
+1. **做什麼？** 研究 GCP 用途 + 建立 Colab 訓練流程 + 取得機器人偵測模型
+2. **進度？** 模型訓練完成，MOT 模式的 #1 blocker 已解除。GCP 研究結論：Colab 免費 T4 足夠，不需要花 GCP 額度
+3. **下一步？** 用實際比賽影片端到端測試 MOT 模式（YOLO+ByteTrack）→ 驗證 Red/Blue 偵測精度 → 調整 ByteTrack 參數 → 測試出手偵測和命中率統計
+4. **阻礙？** 無明確阻礙；MOT 模式已有模型可用，需實際影片驗證效果
+5. **檔案？** `models/frc_robot.onnx`（機器人偵測模型）、`robot_detection.py`（偵測器）、`robot_tracker.py`（MOT/SOT 管理器）、`scoring.py`（出手偵測）、`train_colab.ipynb`（Colab 訓練流程）
+
+---
+
+## Session: 2026-02-20
+
+### 完成項目
+- [x] 診斷播放瓶頸 — 影片為 4K (3840x2160) HEVC 60fps，OpenCV 解碼只有 26fps（連 1x 都跑不到），LANCZOS4 縮放每幀吃 14ms
+- [x] 重構 `_show_frame` → `_show_frame` + `_render_frame` — 將 seek+read 與渲染分離，播放時可用順序讀取而非每幀 seek
+- [x] 新增 `_render_frame_playback` 快速渲染路徑 — 播放專用：INTER_LINEAR（比 LANCZOS4 快 12 倍）、cv2.putText 取代 PIL Draw、精簡 overlay
+- [x] 重寫 `_play_loop` — 小間距用 grab() 跳過中間幀、大間距用 seek、固定 30fps 顯示率
+- [x] 之前 session 未提交的修改 — 全頁面分頁重構、HSV slider 原地更新修復、播放速度 1-5x
+
+### 修改檔案
+- `app.py` — 播放系統重構（_show_frame 拆分為 _show_frame + _render_frame、新增 _render_frame_playback 快速路徑、_play_loop 優化：grab() 跳幀 + 固定 30fps 顯示率）
+- `settings_window.py` — SettingsPanel 嵌入式重構（上個 session 未提交，本次包含）
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復 4K HEVC 60fps 影片的播放流暢度問題（解碼瓶頸 + 縮放瓶頸）
+2. **進度？** 播放系統重構完成，LANCZOS4→LINEAR、PIL→cv2.putText、grab() 跳幀、30fps 顯示率
+3. **下一步？** 用實際影片驗證播放流暢度 → 測試 1-5x 各速度 → 驗證 seek vs grab 的邊界條件 → 測試暫停/拖曳/逐幀仍正常
+4. **阻礙？** 無明確阻礙；需實際影片驗證各種播放情境
+5. **檔案？** `app.py`（`_show_frame`、`_render_frame`、`_render_frame_playback`、`_play_loop`）、`settings_window.py`（SettingsPanel）
+
+---
+
 ## Session: 2026-02-19 (4)
 
 ### 完成項目
@@ -226,4 +279,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-02-19 (4)*
+*Last updated: 2026-02-21*
