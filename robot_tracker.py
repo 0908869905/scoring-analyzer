@@ -72,6 +72,13 @@ class _MOTTracker:
         # Bbox 幀索引: {frame_idx: {label: (x1, y1, x2, y2)}}
         self._frame_bboxes: dict[int, dict[str, tuple]] = {}
 
+        # 自動偵測模式（不需用戶標記）
+        self._auto_mode = False
+
+    def enable_auto_mode(self):
+        """啟用自動偵測模式（不需用戶標記）。"""
+        self._auto_mode = True
+
     def add_robot(self, label: str, bbox_xywh: tuple, frame: np.ndarray,
                   frame_idx: int, alliance: str = ""):
         """註冊用戶標記的機器人。"""
@@ -109,6 +116,26 @@ class _MOTTracker:
 
         # 4. 匹配待定標記
         self._match_pending_markers(tracked, frame_idx)
+
+        # 4.5. 自動模式：未標記的 tracker_id 自動分配 label
+        if self._auto_mode and tracked.tracker_id is not None:
+            for i, tid in enumerate(tracked.tracker_id):
+                tid = int(tid)
+                if tid in self._label_map:
+                    continue
+                class_id = int(tracked.class_id[i]) if tracked.class_id is not None else -1
+                alliance = self._detector.infer_alliance(class_id) if class_id >= 0 else ""
+                if alliance == "red":
+                    label = f"Red-{tid}"
+                elif alliance == "blue":
+                    label = f"Blue-{tid}"
+                else:
+                    label = f"Robot-{tid}"
+                self._label_map[tid] = (label, alliance)
+                self._robot_info[label] = {"alliance": alliance, "mark_frame": -1}
+                self._positions.setdefault(label, [])
+                self._bboxes.setdefault(label, [])
+                print(f"[INFO] MOT 自動偵測: {label} (tracker_id={tid})")
 
         # 5. 記錄已標記機器人的位置
         results = {}
@@ -609,6 +636,18 @@ class RobotTrackerManager:
         """移除機器人（僅 SOT 模式支援）。"""
         if hasattr(self._impl, '_robots') and label in self._impl._robots:
             del self._impl._robots[label]
+
+    def enable_auto_mode(self):
+        """啟用 MOT 自動偵測模式（不需用戶標記）。"""
+        if self._use_mot:
+            self._impl.enable_auto_mode()
+
+    @property
+    def robot_info(self) -> dict:
+        """取得所有機器人的資訊 {label: {"alliance": str, ...}}。"""
+        if hasattr(self._impl, '_robot_info'):
+            return dict(self._impl._robot_info)
+        return {}
 
     def update_all(self, frame: np.ndarray, frame_idx: int) -> dict:
         return self._impl.update_all(frame, frame_idx)

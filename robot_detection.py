@@ -30,9 +30,13 @@ class RobotDetectorONNX:
         import onnxruntime as ort
 
         available = ort.get_available_providers()
-        providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = [p for p in ["CUDAExecutionProvider", "DmlExecutionProvider",
+                                  "CPUExecutionProvider"]
                      if p in available]
         self._sess = ort.InferenceSession(model_path, providers=providers)
+        active_provider = self._sess.get_providers()[0] if self._sess.get_providers() else "unknown"
+        print(f"[INFO] 機器人偵測 ONNX Provider: {active_provider}")
+
         self._input_name = self._sess.get_inputs()[0].name
         self._input_shape = self._sess.get_inputs()[0].shape
         self._img_h = self._input_shape[2]  # typically 640
@@ -41,6 +45,8 @@ class RobotDetectorONNX:
 
         # 讀取類別名稱（若模型 metadata 有提供）
         self.class_names = self._read_class_names()
+        if self.class_names:
+            print(f"[INFO] 機器人偵測模型: {len(self.class_names)} 類 {self.class_names}")
 
     def _read_class_names(self) -> list[str]:
         """嘗試從 ONNX 模型 metadata 讀取類別名稱。"""

@@ -1356,6 +1356,12 @@ class ScoringAnalyzer(ctk.CTk):
         robot_mgr = RobotTrackerManager(
             detector=robot_detector, fps=self.fps)
         tracking_mode = "MOT" if robot_mgr.use_mot else "SOT"
+        print(f"[INFO] 追蹤模式: {tracking_mode}")
+
+        # MOT 自動模式：未標記機器人但模型可用時，自動偵測
+        if not self._robot_markers and robot_mgr.use_mot:
+            robot_mgr.enable_auto_mode()
+            print("[INFO] MOT 自動模式: 未標記機器人，將自動偵測所有機器人")
 
         # 初始化進球引擎
         engine = ScoringEngine(
@@ -1408,6 +1414,10 @@ class ScoringAnalyzer(ctk.CTk):
         ball_mode = "AI" if use_ai else "HSV"
         mode_label = f"{ball_mode}+{tracking_mode}"
 
+        # 診斷計數器
+        total_ball_dets = 0
+        total_robot_dets = 0
+
         # 逐幀處理
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         for frame_idx in range(total):
@@ -1429,11 +1439,13 @@ class ScoringAnalyzer(ctk.CTk):
             # 球偵測+追蹤
             dets = detect_balls(frame)
             frame_detections[frame_idx] = dets
+            total_ball_dets += len(dets)
             ball_positions = ball_tracker.update(dets, frame_idx)
 
             # 機器人追蹤
             robot_mgr.update_all(frame, frame_idx)
             robot_pos = robot_mgr.get_all_positions(frame_idx)
+            total_robot_dets += len(robot_pos)
             robot_positions_cache[frame_idx] = \
                 robot_mgr.get_all_display_positions(frame_idx)
             robot_bboxes_cache[frame_idx] = \
@@ -1443,6 +1455,12 @@ class ScoringAnalyzer(ctk.CTk):
             engine.process_frame(frame_idx, ball_positions, robot_pos,
                                  ball_tracker.trajectories)
 
+            # 診斷日誌（每 100 幀）
+            if frame_idx > 0 and frame_idx % 100 == 0:
+                print(f"[INFO] Frame 0-{frame_idx}: "
+                      f"球偵測 {total_ball_dets} 個, "
+                      f"機器人偵測 {total_robot_dets} 個")
+
             # 更新進度
             if frame_idx % 5 == 0:
                 pct = (frame_idx + 1) / total * 100
@@ -1450,6 +1468,10 @@ class ScoringAnalyzer(ctk.CTk):
                            self._update_progress(p, f, m))
 
         cap.release()
+
+        print(f"[INFO] 分析完成: 共 {total} 幀, "
+              f"球偵測總計 {total_ball_dets}, "
+              f"機器人偵測總計 {total_robot_dets}")
 
         # 後處理：位置插值（MOT 模式）
         robot_mgr.interpolate_positions()
@@ -1469,10 +1491,20 @@ class ScoringAnalyzer(ctk.CTk):
         # 出手偵測後處理
         engine.detect_shots(all_trajectories, robot_positions_cache)
 
+        # 收集自動偵測的機器人資訊
+        auto_robots = []
+        if not self._robot_markers and robot_mgr.use_mot:
+            for label, info in robot_mgr.robot_info.items():
+                auto_robots.append((label, info.get("alliance", "")))
+            if auto_robots:
+                print(f"[INFO] MOT 自動模式: 共偵測到 "
+                      f"{len(auto_robots)} 台機器人")
+
         # 回到主線程
         self.after(0, lambda: self._finish_analysis(
             all_trajectories, frame_detections,
-            robot_positions_cache, robot_bboxes_cache, engine
+            robot_positions_cache, robot_bboxes_cache, engine,
+            auto_robots
         ))
 
     def _update_progress(self, pct, frame_idx, mode=""):
@@ -1489,7 +1521,8 @@ class ScoringAnalyzer(ctk.CTk):
         self._set_status(f"分析錯誤: {msg}", COLORS["error"])
 
     def _finish_analysis(self, trajectories, frame_dets,
-                         robot_cache, robot_bbox_cache, engine):
+                         robot_cache, robot_bbox_cache, engine,
+                         auto_robots=None):
         """分析完成，更新 UI。"""
         self._all_trajectories = trajectories
         self._frame_detections = frame_dets
@@ -1501,6 +1534,13 @@ class ScoringAnalyzer(ctk.CTk):
 
         self.analyze_btn.configure(state="normal")
         self.progress_bar.pack_forget()
+
+        # 添加自動偵測的機器人到標記列表（用於顯示和統計）
+        if auto_robots:
+            for label, alliance in auto_robots:
+                self._robot_markers.append(
+                    (label, alliance, 0, 0, 0, 0, -1))
+            self._update_robot_list()
 
         # 更新得分統計表
         self._update_score_table()

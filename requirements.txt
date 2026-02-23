@@ -3,5 +3,12 @@ customtkinter>=5.2.0
 numpy>=1.24.0
 Pillow>=10.0.0
 scipy>=1.10.0
-onnxruntime>=1.17.0
 supervision>=0.21.0
+
+# ── ONNX Runtime（擇一安裝）──────────────────────────
+# CPU 版（預設）:
+onnxruntime>=1.17.0
+# GPU 版（NVIDIA CUDA，取代上方 CPU 版）:
+#   pip install onnxruntime-gpu>=1.17.0
+# DirectML 版（AMD/Intel GPU，Windows）:
+#   pip install onnxruntime-directml>=1.17.0

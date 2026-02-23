@@ -36,7 +36,7 @@ COLORS = {
 YELLOW_LOW = (20, 100, 100)
 YELLOW_HIGH = (35, 255, 255)
 MIN_BLOB_AREA = 150
-MAX_BLOB_AREA = 10000
+MAX_BLOB_AREA = 50000
 
 # ── 球追蹤參數 ────────────────────────────────────────
 MAX_MATCH_DIST = 200

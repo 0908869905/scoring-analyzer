@@ -13,6 +13,17 @@ from config import (
     AI_CONFIDENCE_THRESHOLD, AI_MIN_AREA, AI_MAX_AREA,
 )
 
+# ── OpenCL GPU 加速（球偵測影像處理）──────────────────
+_USE_OPENCL = False
+try:
+    if cv2.ocl.haveOpenCL():
+        cv2.ocl.setUseOpenCL(True)
+        _USE_OPENCL = True
+        _dev = cv2.ocl.Device.getDefault()
+        print(f"[INFO] OpenCL GPU 加速: {_dev.name()}")
+except Exception:
+    pass
+
 
 def detect_yellow_balls(frame, hsv_low=None, hsv_high=None,
                         min_area=None, max_area=None):
@@ -34,12 +45,20 @@ def detect_yellow_balls(frame, hsv_low=None, hsv_high=None,
     min_a = min_area if min_area is not None else MIN_BLOB_AREA
     max_a = max_area if max_area is not None else MAX_BLOB_AREA
 
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # 影像處理（OpenCL GPU 加速：5 個操作全在 GPU 上執行）
+    src = cv2.UMat(frame) if _USE_OPENCL else frame
+    blurred = cv2.GaussianBlur(src, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, low, high)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+
+    # findContours 不支援 GPU，下載 mask 到 CPU
+    if _USE_OPENCL:
+        mask = mask.get()
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
@@ -74,9 +93,13 @@ class FuelDetectorONNX:
         import onnxruntime as ort
 
         available = ort.get_available_providers()
-        providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = [p for p in ["CUDAExecutionProvider", "DmlExecutionProvider",
+                                  "CPUExecutionProvider"]
                      if p in available]
         self._sess = ort.InferenceSession(model_path, providers=providers)
+        active_provider = self._sess.get_providers()[0] if self._sess.get_providers() else "unknown"
+        print(f"[INFO] 球偵測 AI ONNX Provider: {active_provider}")
+
         self._input_name = self._sess.get_inputs()[0].name
         # 輸入形狀: [1, 3, H, W]
         self._input_shape = self._sess.get_inputs()[0].shape
