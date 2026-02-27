@@ -19,7 +19,7 @@ FRC Robot Detection Model Training Script
     python train_robot_model.py --local-dataset path/to/data.yaml
 
     # 自訂參數
-    python train_robot_model.py --api-key KEY --model yolo11n --epochs 100 --imgsz 640
+    python train_robot_model.py --api-key KEY --model yolo26n --epochs 100 --imgsz 640
 """
 
 import argparse
@@ -200,8 +200,8 @@ def main():
                         help="Roboflow dataset version")
 
     # 訓練參數
-    parser.add_argument("--model", type=str, default="yolo11n",
-                        help="YOLO 模型名稱 (yolo11n, yolo11s, yolo26n 等)")
+    parser.add_argument("--model", type=str, default="yolo26n",
+                        help="YOLO 模型名稱 (yolo26n, yolo26s, yolo11n 等)")
     parser.add_argument("--epochs", type=int, default=50,
                         help="訓練 epochs 數")
     parser.add_argument("--imgsz", type=int, default=640,

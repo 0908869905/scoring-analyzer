@@ -19,6 +19,8 @@ from config import (
     VITTRACK_SCORE_THRESHOLD,
     AI_CONFIDENCE_THRESHOLD, AI_MIN_AREA, AI_MAX_AREA,
     DETECTION_MODE,
+    BG_SAMPLE_COUNT, BG_FG_THRESHOLD, BG_DILATE_KERNEL,
+    BUMPER_TEMPLATE_SIMILARITY,
 )
 
 PRESETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
@@ -78,6 +80,14 @@ class RuntimeConfig:
     bytetrack_lost_buffer: int = BYTETRACK_LOST_BUFFER
     bytetrack_match_thresh: float = BYTETRACK_MATCH_THRESH
     bytetrack_min_consecutive: int = BYTETRACK_MIN_CONSECUTIVE
+
+    # ── Bumper 模板 ──
+    bumper_template_similarity: float = BUMPER_TEMPLATE_SIMILARITY
+
+    # ── 背景模型 ──
+    bg_sample_count: int = BG_SAMPLE_COUNT
+    bg_fg_threshold: int = BG_FG_THRESHOLD
+    bg_dilate_kernel: int = BG_DILATE_KERNEL
 
     # ── 比賽 ──
     auto_duration_sec: int = AUTO_DURATION_SEC

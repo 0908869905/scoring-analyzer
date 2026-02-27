@@ -35,7 +35,7 @@ COLORS = {
 # ── 球偵測參數 ────────────────────────────────────────
 YELLOW_LOW = (20, 100, 100)
 YELLOW_HIGH = (35, 255, 255)
-MIN_BLOB_AREA = 150
+MIN_BLOB_AREA = 50
 MAX_BLOB_AREA = 50000
 
 # ── 球追蹤參數 ────────────────────────────────────────
@@ -64,26 +64,67 @@ AI_MAX_AREA = 200000
 VITTRACK_MODEL_PATH = "models/object_tracking_vittrack_2023sep.onnx"
 VITTRACK_SCORE_THRESHOLD = 0.3
 
-# ── 機器人 YOLO 偵測（MOT 主要模式）──────────────────
+# ── 機器人偵測模式 ──────────────────────────────────
+ROBOT_DETECTION_MODE = "HSV"        # "HSV"（HSV Bumper，預設）或 "YOLO"（需 ONNX 模型）
+
+# ── 機器人 YOLO 偵測（備選模式）──────────────────────
 ROBOT_DETECTION_MODEL_PATH = "models/frc_robot.onnx"
-ROBOT_DETECTION_CONFIDENCE = 0.4
-ROBOT_DETECTION_NMS_IOU = 0.45
+ROBOT_DETECTION_CONFIDENCE = 0.10   # 低閾值捕捉 Blue 機器人（多數 conf=0.10-0.19）
+ROBOT_DETECTION_NMS_IOU = 0.6       # 提高以保留靠近機器人的獨立偵測（0.45→0.6）
+
+# ── HSV Bumper 偵測（無需訓練資料的機器人偵測）──────────
+# 紅色 bumper（色相環繞：0~10 和 170~180 兩段）
+BUMPER_RED_LOW_1 = (0, 120, 80)
+BUMPER_RED_HIGH_1 = (10, 255, 255)
+BUMPER_RED_LOW_2 = (170, 120, 80)
+BUMPER_RED_HIGH_2 = (180, 255, 255)
+# 藍色 bumper
+BUMPER_BLUE_LOW = (100, 120, 60)
+BUMPER_BLUE_HIGH = (130, 255, 255)
+# 面積過濾（像素²）
+BUMPER_MIN_AREA = 300       # 太小 = 噪點（4K 下 bumper 最小約 500px²）
+BUMPER_MAX_AREA = 80000     # 太大 = 誤偵測（4K 下 bumper 最大約 50000px²）
+# 長寬比過濾（bumper 是扁長方形）
+BUMPER_MIN_ASPECT = 1.2     # 最小長寬比（寬/高），bumper 通常 > 1.5
+BUMPER_MAX_ASPECT = 12.0    # 最大長寬比，避免偵測到長條噪點
+# NMS IoU（合併重疊偵測）
+BUMPER_NMS_IOU = 0.4
+# Bumper 模板比對相似度閾值（0~1，越高越嚴格）
+BUMPER_TEMPLATE_SIMILARITY = 0.3
 
 # ── ByteTrack 多目標追蹤參數 ──────────────────────────
-BYTETRACK_TRACK_THRESH = 0.3       # 追蹤啟動閾值
+BYTETRACK_TRACK_THRESH = 0.10      # 追蹤啟動閾值（必須 <= ROBOT_DETECTION_CONFIDENCE）
 BYTETRACK_LOST_BUFFER = 120        # 丟失緩衝（幀數，4秒@30fps）
-BYTETRACK_MATCH_THRESH = 0.8       # 最小匹配閾值
-BYTETRACK_MIN_CONSECUTIVE = 3      # 最少連續幀確認新追蹤
+BYTETRACK_MATCH_THRESH = 0.3       # IoU 匹配閾值（0.8→0.3: FRC 機器人移動快，需要寬鬆匹配）
+BYTETRACK_MIN_CONSECUTIVE = 1      # 最少連續幀（3→1: 加速新追蹤建立）
+
+# ── MOT 進階參數 ────────────────────────────────────
+MOT_DETECT_INTERVAL = 10           # 每 N 幀做 tiled 偵測（全幀偵測每幀都做）
+MOT_REID_MAX_DIST = 400            # 重新辨識基準距離（像素，會依幀間隔動態縮放）
+MOT_HISTOGRAM_WEIGHT = 0.4         # 顏色直方圖 Re-ID 權重（0=純距離, 1=全靠外觀）
+MOT_REID_MAX_SECONDS = 5           # 重新辨識最大時間窗口（秒，從 3s 提高到 5s）
+MOT_MIN_TRACK_FRAMES = 15          # 最少偵測幀數（少於此值的 label 在後處理中被移除，60fps 下 15 幀 ≈ 0.25 秒）
+MOT_MERGE_MAX_OVERLAP = 15         # 合併最大重疊幀數（60fps 下 ≈ 250ms）
+MOT_MERGE_BOUNDARY_DIST = 800      # 合併邊界距離閾值（像素）
+MOT_MERGE_SEARCH_WINDOW = 180      # 合併邊界搜尋窗口（幀數，60fps 下 ≈ 3 秒）
 
 # ── 進球判定參數 ──────────────────────────────────────
 SCORE_PROXIMITY_FRAMES = 15  # 回溯射手歸因的幀數
-SCORE_MAX_SHOOTER_DIST = 300 # 射手歸因最大距離（像素）
+SCORE_MAX_SHOOTER_DIST = 500 # 射手歸因最大距離（像素，4K 下需 500+）
 SCORE_ZONE_DWELL_FRAMES = 3  # 球在區域內停留幀數才算進球
 SCORE_COOLDOWN_FRAMES = 10   # 同一球連續進球冷卻幀數
+HP_ATTRIBUTION_DIST = 300    # 球軌跡點離 HP 線段多近才歸因給 HP（像素）
+BALL_OWNERSHIP_DIST = 200    # 球所有權：球距機器人多近才算「持有」（像素，4K 下約機器人 2-3 倍半徑）
 
 # ── 出手偵測參數 ──────────────────────────────────────
 SHOT_MIN_VELOCITY = 15       # 出手最低速度（像素/幀）
+SHOT_MIN_UPWARD_VELOCITY = 3 # 球垂直上升最低速度（dy<0 時的絕對值，像素/幀）
 SHOT_ROBOT_PROXIMITY = 150   # 出手時球距機器人最大距離（像素）
+
+# ── 背景模型參數 ──────────────────────────────────────
+BG_SAMPLE_COUNT = 50         # 取樣幀數（均勻取樣用於建立背景中位數）
+BG_FG_THRESHOLD = 30         # 前景閾值 (0-255)，absdiff 大於此值視為前景
+BG_DILATE_KERNEL = 5         # 膨脹核大小，填補前景遮罩中的小空洞
 
 # ── 比賽時間設定（預設值）────────────────────────────
 AUTO_DURATION_SEC = 15       # 自主期秒數

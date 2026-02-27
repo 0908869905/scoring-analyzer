@@ -9,9 +9,10 @@ from config import (
     SCORE_PROXIMITY_FRAMES, SCORE_MAX_SHOOTER_DIST,
     SCORE_ZONE_DWELL_FRAMES, SCORE_COOLDOWN_FRAMES,
     AUTO_DURATION_SEC, TELEOP_START_SEC,
-    SHOT_MIN_VELOCITY, SHOT_ROBOT_PROXIMITY,
+    SHOT_MIN_VELOCITY, SHOT_MIN_UPWARD_VELOCITY, SHOT_ROBOT_PROXIMITY,
+    HP_ATTRIBUTION_DIST, BALL_OWNERSHIP_DIST,
 )
-from geometry import point_in_polygon, distance
+from geometry import point_in_polygon, point_to_segment_distance, distance
 
 
 @dataclass
@@ -108,7 +109,10 @@ class ScoringEngine:
                  zone_dwell_frames=SCORE_ZONE_DWELL_FRAMES,
                  cooldown_frames=SCORE_COOLDOWN_FRAMES,
                  shot_min_velocity=SHOT_MIN_VELOCITY,
-                 shot_robot_proximity=SHOT_ROBOT_PROXIMITY):
+                 shot_min_upward_velocity=SHOT_MIN_UPWARD_VELOCITY,
+                 shot_robot_proximity=SHOT_ROBOT_PROXIMITY,
+                 hp_attribution_dist=HP_ATTRIBUTION_DIST,
+                 ball_ownership_dist=BALL_OWNERSHIP_DIST):
         self.fps = fps
         self.auto_end_frame = int(auto_sec * fps)
         self.teleop_start_frame = int(teleop_start_sec * fps)
@@ -117,9 +121,13 @@ class ScoringEngine:
         self._zone_dwell_frames = zone_dwell_frames
         self._cooldown_frames = cooldown_frames
         self._shot_min_velocity = shot_min_velocity
+        self._shot_min_upward_velocity = shot_min_upward_velocity
         self._shot_robot_proximity = shot_robot_proximity
+        self._hp_attribution_dist = hp_attribution_dist
+        self._ownership_dist = ball_ownership_dist
 
         self.zones = []          # List[ScoringZone]
+        self.hp_lines = []       # [{"name": str, "alliance": str, "p1": (x,y), "p2": (x,y)}]
         self.events = []         # List[ScoreEvent]
         self.shot_events = []    # List[ShotEvent]
         self.robot_scores = {}   # label -> RobotScore
@@ -128,6 +136,9 @@ class ScoringEngine:
         self._ball_zone_frames = {}  # (track_id, zone_name) -> consecutive_frames
         self._ball_in_zone = {}      # track_id -> set of zone_names currently in
         self._ball_cooldown = {}     # track_id -> cooldown_remaining
+
+        # 球所有權追蹤（後處理計算）
+        self._ball_ownership = {}    # {ball_track_id: {frame_idx: owner_label}}
 
     def add_zone(self, name, points, alliance=""):
         self.zones.append(ScoringZone(name, points, alliance))
@@ -145,6 +156,8 @@ class ScoringEngine:
         self._ball_zone_frames.clear()
         self._ball_in_zone.clear()
         self._ball_cooldown.clear()
+        self._ball_ownership.clear()
+        # hp_lines 不清除（由 UI 管理）
 
     def get_period(self, frame_idx):
         if frame_idx < self.auto_end_frame:
@@ -218,6 +231,94 @@ class ScoringEngine:
 
             self._ball_in_zone[tid] = curr_zones
 
+    def compute_ball_ownership(self, ball_trajectories: dict,
+                               robot_positions_by_frame: dict):
+        """
+        後處理：計算每顆球在每幀的所有者（最近機器人）。
+
+        球接近機器人（距離 <= ownership_dist）且球速低於出手速度時轉移所有權；
+        球在飛行中（高速度或無機器人在附近）時保持上一個所有者。
+
+        Args:
+            ball_trajectories: {track_id: [(f, cx, cy, area), ...]}
+            robot_positions_by_frame: {frame_idx: {label: (cx, cy)}}
+        """
+        self._ball_ownership.clear()
+        dist_threshold = self._ownership_dist
+        # 球速低於出手速度一半才算「被持有」，避免滾動中的球被誤歸
+        speed_threshold = self._shot_min_velocity * 0.5
+        total_owned = 0
+        total_points = 0
+
+        for tid, traj in ball_trajectories.items():
+            if len(traj) < 2:
+                continue
+
+            traj_sorted = sorted(traj, key=lambda p: p[0])
+            ownership = {}
+            current_owner = None
+            prev_x, prev_y, prev_f = None, None, None
+
+            for point in traj_sorted:
+                f, bx, by = point[0], point[1], point[2]
+                total_points += 1
+
+                # 計算球速度（像素/幀）
+                ball_speed = 0.0
+                if prev_x is not None and f > prev_f:
+                    dt = f - prev_f
+                    ball_speed = math.hypot(bx - prev_x, by - prev_y) / dt
+                prev_x, prev_y, prev_f = bx, by, f
+
+                # 球在飛行中（高速度）→ 保持 current_owner，不允許轉移
+                if ball_speed >= speed_threshold:
+                    if current_owner:
+                        ownership[f] = current_owner
+                        total_owned += 1
+                    continue
+
+                robot_pos = robot_positions_by_frame.get(f, {})
+                if not robot_pos:
+                    if current_owner:
+                        ownership[f] = current_owner
+                        total_owned += 1
+                    continue
+
+                best_label = None
+                best_dist = float('inf')
+                for label, pos in robot_pos.items():
+                    rx, ry = pos[0], pos[1]
+                    d = distance((bx, by), (rx, ry))
+                    if d < best_dist:
+                        best_dist = d
+                        best_label = label
+
+                if best_dist <= dist_threshold:
+                    current_owner = best_label
+
+                if current_owner:
+                    ownership[f] = current_owner
+                    total_owned += 1
+
+            if ownership:
+                self._ball_ownership[tid] = ownership
+
+        n_balls = len(self._ball_ownership)
+        coverage = total_owned / max(total_points, 1) * 100
+        print(f"[INFO] Ball Ownership: {n_balls} 條軌跡有 owner, "
+              f"覆蓋率 {coverage:.0f}% ({total_owned}/{total_points} 點)")
+
+    def _get_ball_owner_at_frame(self, ball_track_id: int, frame_idx: int,
+                                  lookback: int = 0) -> str | None:
+        """查找球在指定幀（或往前 lookback 幀內）的所有者。"""
+        ownership = self._ball_ownership.get(ball_track_id)
+        if not ownership:
+            return None
+        for f in range(frame_idx, frame_idx - lookback - 1, -1):
+            if f in ownership:
+                return ownership[f]
+        return None
+
     def detect_shots(self, ball_trajectories: dict, robot_positions_by_frame: dict):
         """
         後處理：偵測出手事件（進球 + 未進球）。
@@ -239,22 +340,28 @@ class ScoringEngine:
 
             traj_sorted = sorted(traj, key=lambda p: p[0])
 
-            # 計算逐幀速度
+            # 計算逐幀速度和垂直速度
             velocities = []
+            dy_values = []
             for i in range(1, len(traj_sorted)):
                 f0, x0, y0, *_ = traj_sorted[i - 1]
                 f1, x1, y1, *_ = traj_sorted[i]
                 dt = f1 - f0
                 if dt <= 0:
                     velocities.append(0.0)
+                    dy_values.append(0.0)
                     continue
                 v = math.hypot(x1 - x0, y1 - y0) / dt
                 velocities.append(v)
+                dy_values.append((y1 - y0) / dt)
 
-            # 找出手點：速度突增 + 球在機器人附近
+            # 找出手點：速度突增 + 球往上飛 + 球在機器人附近
             shot_detected = False
             for i, vel in enumerate(velocities):
                 if vel < self._shot_min_velocity:
+                    continue
+                # 球必須往畫面上方飛（dy < 0，攝影機斜下拍）
+                if dy_values[i] >= -self._shot_min_upward_velocity:
                     continue
                 if shot_detected:
                     continue  # 同一軌跡只取第一次出手
@@ -263,29 +370,36 @@ class ScoringEngine:
                 bx = traj_sorted[i + 1][1]
                 by = traj_sorted[i + 1][2]
 
-                # 找出手時最近的機器人
-                robot_pos = robot_positions_by_frame.get(f_shot, {})
-                if not robot_pos:
-                    # 嘗試附近幀
-                    for delta in range(-3, 4):
-                        robot_pos = robot_positions_by_frame.get(
-                            f_shot + delta, {})
-                        if robot_pos:
-                            break
+                # 優先用 ownership 歸因
+                owner = self._get_ball_owner_at_frame(
+                    tid, f_shot, lookback=self._proximity_frames)
 
                 best_label = "未知"
                 best_dist = float('inf')
                 best_alliance = ""
 
-                for label, pos in robot_pos.items():
-                    rx, ry = pos[0], pos[1]
-                    d = math.hypot(bx - rx, by - ry)
-                    if d < best_dist:
-                        best_dist = d
-                        best_label = label
+                if owner:
+                    best_label = owner
+                    best_dist = 0.0  # ownership-based
+                else:
+                    # Fallback: 找出手時最近的機器人
+                    robot_pos = robot_positions_by_frame.get(f_shot, {})
+                    if not robot_pos:
+                        for delta in range(-3, 4):
+                            robot_pos = robot_positions_by_frame.get(
+                                f_shot + delta, {})
+                            if robot_pos:
+                                break
 
-                if best_dist > self._shot_robot_proximity:
-                    continue  # 太遠，不算出手
+                    for label, pos in robot_pos.items():
+                        rx, ry = pos[0], pos[1]
+                        d = math.hypot(bx - rx, by - ry)
+                        if d < best_dist:
+                            best_dist = d
+                            best_label = label
+
+                    if best_dist > self._shot_robot_proximity:
+                        continue  # 太遠，不算出手
 
                 # 取得射手聯盟
                 if best_label in self.robot_scores:
@@ -405,6 +519,115 @@ class ScoringEngine:
             score.auto_misses += 1
         else:
             score.teleop_misses += 1
+
+    def reattribute_shooters(self, ball_trajectories: dict,
+                              robot_positions_by_frame: dict):
+        """後處理：用完整機器人位置資料重新歸因射手。
+
+        在 merge_fragmented_labels() + interpolate_positions() 之後呼叫，
+        利用完整的（合併 + 插值後的）位置資料重新找出每個進球事件的射手。
+        若設定了 HP 線段且球軌跡經過 HP 附近，優先歸因給 HP。
+
+        Args:
+            ball_trajectories: {track_id: [(f, cx, cy, area), ...]}
+            robot_positions_by_frame: {frame_idx: {label: (cx, cy)}}
+        """
+        # 清空進球統計（保留 miss 統計），稍後重新累計
+        for score in self.robot_scores.values():
+            score.auto_goals = 0
+            score.teleop_goals = 0
+
+        ownership_used = 0
+        proximity_used = 0
+        hp_used = 0
+
+        for event in self.events:
+            traj = ball_trajectories.get(event.ball_track_id, [])
+            if not traj:
+                self._update_robot_goal(
+                    event.shooter_label, event.period, event.alliance)
+                continue
+
+            lookback_start = max(0,
+                                 event.frame_idx - self._proximity_frames)
+            relevant_points = [
+                (f, cx, cy) for f, cx, cy, *_ in traj
+                if lookback_start <= f <= event.frame_idx
+            ]
+
+            if not relevant_points:
+                self._update_robot_goal(
+                    event.shooter_label, event.period, event.alliance)
+                continue
+
+            # 優先順序 1: HP 歸因
+            hp_label = self._check_hp_attribution(
+                relevant_points, event.alliance)
+            if hp_label:
+                event.shooter_label = hp_label
+                event.shooter_dist = 0.0
+                self._update_robot_goal(
+                    hp_label, event.period, event.alliance)
+                hp_used += 1
+                continue
+
+            # 優先順序 2: Ball ownership 查表
+            owner = self._get_ball_owner_at_frame(
+                event.ball_track_id, event.frame_idx,
+                lookback=self._proximity_frames)
+            if owner:
+                event.shooter_label = owner
+                event.shooter_dist = 0.0
+                self._update_robot_goal(
+                    owner, event.period, event.alliance)
+                ownership_used += 1
+                continue
+
+            # 優先順序 3: Fallback — 回溯距離搜尋（原邏輯）
+            best_label = "未知"
+            best_dist = float('inf')
+
+            for f, bx, by in relevant_points:
+                robot_pos = robot_positions_by_frame.get(f, {})
+                for label, pos in robot_pos.items():
+                    rx, ry = pos[0], pos[1]
+                    d = distance((bx, by), (rx, ry))
+                    if d < best_dist:
+                        best_dist = d
+                        best_label = label
+
+            if best_dist <= self._max_shooter_dist:
+                event.shooter_label = best_label
+                event.shooter_dist = best_dist
+            else:
+                event.shooter_label = "未知"
+                event.shooter_dist = best_dist
+
+            proximity_used += 1
+            self._update_robot_goal(
+                event.shooter_label, event.period, event.alliance)
+
+        total_events = len(self.events)
+        print(f"[INFO] 射手歸因: {total_events} 進球 — "
+              f"HP:{hp_used}, Ownership:{ownership_used}, "
+              f"Proximity:{proximity_used}")
+
+    def _check_hp_attribution(self, relevant_points, zone_alliance):
+        """檢查球軌跡是否經過 HP 線段附近，回傳 HP label 或 None。"""
+        if not self.hp_lines:
+            return None
+        for hp in self.hp_lines:
+            # HP 的聯盟要跟進球區域的聯盟一致
+            if hp["alliance"] and zone_alliance and \
+                    hp["alliance"] != zone_alliance:
+                continue
+            x1, y1 = hp["p1"]
+            x2, y2 = hp["p2"]
+            for _, bx, by in relevant_points:
+                d = point_to_segment_distance(bx, by, x1, y1, x2, y2)
+                if d <= self._hp_attribution_dist:
+                    return hp["name"]
+        return None
 
     def get_summary(self):
         return dict(self.robot_scores)

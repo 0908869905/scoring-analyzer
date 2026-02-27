@@ -70,6 +70,18 @@ def distance(p1, p2):
     return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
 
+def point_to_segment_distance(px, py, x1, y1, x2, y2):
+    """計算點 (px, py) 到線段 (x1,y1)-(x2,y2) 的最短距離。"""
+    dx, dy = x2 - x1, y2 - y1
+    len_sq = dx * dx + dy * dy
+    if len_sq == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / len_sq))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
 def rect_center(rx, ry, rw, rh):
     """矩形中心座標。"""
     return (rx + rw / 2, ry + rh / 2)

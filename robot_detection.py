@@ -1,7 +1,11 @@
 """
-FRC Scoring Analyzer — 機器人偵測（YOLO ONNX 本地離線推理）
+FRC Scoring Analyzer — 機器人偵測
 
-支援兩種 ONNX 輸出格式:
+支援兩種偵測模式:
+1. HSV Bumper 偵測（預設）: 用色彩過濾偵測紅藍 bumper，不需訓練資料
+2. YOLO ONNX 偵測（備選）: 需要 frc_robot.onnx 模型檔
+
+ONNX 支援兩種輸出格式:
 - 傳統 YOLO: [1, 4+num_classes, num_proposals] — 需手動 NMS
 - NMS-Free (YOLO26/end2end): [1, num_detections, 6] — 已去重
 """
@@ -15,6 +19,12 @@ from config import (
     ROBOT_DETECTION_MODEL_PATH,
     ROBOT_DETECTION_CONFIDENCE,
     ROBOT_DETECTION_NMS_IOU,
+    BUMPER_RED_LOW_1, BUMPER_RED_HIGH_1,
+    BUMPER_RED_LOW_2, BUMPER_RED_HIGH_2,
+    BUMPER_BLUE_LOW, BUMPER_BLUE_HIGH,
+    BUMPER_MIN_AREA, BUMPER_MAX_AREA,
+    BUMPER_MIN_ASPECT, BUMPER_MAX_ASPECT,
+    BUMPER_NMS_IOU,
 )
 
 _ROBOT_ONNX_PATH = os.path.join(
@@ -218,6 +228,87 @@ class RobotDetectorONNX:
 
         return results
 
+    def detect_tiled(self, frame: np.ndarray,
+                     confidence: float | None = None,
+                     robot_only: bool = True,
+                     tile_size: int = 1280,
+                     overlap: float = 0.15) -> list[tuple]:
+        """
+        Tile-based 偵測 — 將大影像切割成重疊小塊分別偵測再合併。
+
+        解決 4K 影像縮放到 640x640 導致機器人太小的問題。
+        例: 3840x2160 直接縮放 → 機器人僅 25px；
+            切成 1280px tiles → 機器人 ~75px，偵測率大幅提升。
+
+        Args:
+            frame: BGR 影像
+            confidence: 信心閾值
+            robot_only: 只回傳機器人類別
+            tile_size: tile 邊長（像素）
+            overlap: tile 重疊比例 (0-0.5)
+
+        Returns:
+            [(x1, y1, x2, y2, conf, class_id), ...]
+        """
+        h, w = frame.shape[:2]
+        conf_thresh = confidence if confidence is not None else ROBOT_DETECTION_CONFIDENCE
+
+        # 小影像直接用普通偵測
+        if max(h, w) <= tile_size * 1.2:
+            return self.detect(frame, confidence, robot_only)
+
+        step = int(tile_size * (1 - overlap))
+        all_dets = []
+
+        # 滑動窗口切割
+        for y_start in range(0, h, step):
+            for x_start in range(0, w, step):
+                # tile 範圍（確保不超出邊界且維持 tile_size）
+                x_end = min(x_start + tile_size, w)
+                y_end = min(y_start + tile_size, h)
+                x_begin = max(0, x_end - tile_size)
+                y_begin = max(0, y_end - tile_size)
+
+                tile = frame[y_begin:y_end, x_begin:x_end]
+
+                # 對 tile 偵測（不過濾 robot_only，合併後再過濾）
+                dets = self.detect(tile, confidence=conf_thresh, robot_only=False)
+
+                # 將 tile 座標偏移到原始影像座標
+                for d in dets:
+                    all_dets.append((
+                        d[0] + x_begin, d[1] + y_begin,
+                        d[2] + x_begin, d[3] + y_begin,
+                        d[4], d[5],
+                    ))
+
+        if not all_dets:
+            return []
+
+        # 全域 NMS 去除重疊區域的重複偵測
+        boxes_for_nms = []
+        confs = []
+        for d in all_dets:
+            boxes_for_nms.append([
+                float(d[0]), float(d[1]),
+                float(d[2] - d[0]), float(d[3] - d[1]),  # x,y,w,h
+            ])
+            confs.append(float(d[4]))
+
+        indices = cv2.dnn.NMSBoxes(
+            boxes_for_nms, confs, conf_thresh, self._nms_iou)
+
+        results = []
+        if len(indices) > 0:
+            for i in indices.flatten():
+                results.append(all_dets[i])
+
+        # 過濾非機器人
+        if robot_only and self.class_names:
+            results = [r for r in results if self.is_robot_class(r[5])]
+
+        return results
+
     def get_class_name(self, class_id: int) -> str:
         """取得類別名稱。"""
         if 0 <= class_id < len(self.class_names):
@@ -272,3 +363,243 @@ def load_robot_model(model_path: str | None = None) -> RobotDetectorONNX:
             "或手動放置 ONNX 模型到 models/ 目錄。"
         )
     return RobotDetectorONNX(path, nms_iou=ROBOT_DETECTION_NMS_IOU)
+
+
+# ═══════════════════════════════════════════════════════
+# HSV Bumper 偵測（不需訓練資料）
+# ═══════════════════════════════════════════════════════
+
+
+class BumperDetectorHSV:
+    """HSV 色彩過濾偵測紅藍 bumper — 與 RobotDetectorONNX 同介面。
+
+    FRC bumper 是標準化零件（紅/藍布包覆 pool noodle），顏色鮮明飽和，
+    適合用 HSV 過濾偵測。不需要任何訓練資料，跨年份通用。
+    """
+
+    # 類別定義（與 YOLO 模型一致，tuple 避免意外修改）
+    class_names = ("Red", "Blue")
+
+    def __init__(self,
+                 red_low_1=None, red_high_1=None,
+                 red_low_2=None, red_high_2=None,
+                 blue_low=None, blue_high=None,
+                 min_area=None, max_area=None,
+                 min_aspect=None, max_aspect=None,
+                 nms_iou=None):
+        self._red_low_1 = np.array(red_low_1 if red_low_1 is not None else BUMPER_RED_LOW_1, dtype=np.uint8)
+        self._red_high_1 = np.array(red_high_1 if red_high_1 is not None else BUMPER_RED_HIGH_1, dtype=np.uint8)
+        self._red_low_2 = np.array(red_low_2 if red_low_2 is not None else BUMPER_RED_LOW_2, dtype=np.uint8)
+        self._red_high_2 = np.array(red_high_2 if red_high_2 is not None else BUMPER_RED_HIGH_2, dtype=np.uint8)
+        self._blue_low = np.array(blue_low if blue_low is not None else BUMPER_BLUE_LOW, dtype=np.uint8)
+        self._blue_high = np.array(blue_high if blue_high is not None else BUMPER_BLUE_HIGH, dtype=np.uint8)
+        self._min_area = min_area if min_area is not None else BUMPER_MIN_AREA
+        self._max_area = max_area if max_area is not None else BUMPER_MAX_AREA
+        self._min_aspect = min_aspect if min_aspect is not None else BUMPER_MIN_ASPECT
+        self._max_aspect = max_aspect if max_aspect is not None else BUMPER_MAX_ASPECT
+        self._nms_iou = nms_iou if nms_iou is not None else BUMPER_NMS_IOU
+
+        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))
+        self._kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+
+        self._diag_count = 0
+
+        # Bumper 顏色模板（取色註冊）
+        self._templates: list[tuple[str, str, np.ndarray]] = []
+        # [(label, alliance, histogram), ...]
+        self._template_similarity = 0.3
+
+        print(f"[INFO] HSV Bumper 偵測器啟用 — 不需 ONNX 模型")
+        print(f"[INFO]   Red HSV: {tuple(self._red_low_1)}-{tuple(self._red_high_1)} "
+              f"| {tuple(self._red_low_2)}-{tuple(self._red_high_2)}")
+        print(f"[INFO]   Blue HSV: {tuple(self._blue_low)}-{tuple(self._blue_high)}")
+        print(f"[INFO]   Area: {self._min_area}-{self._max_area}  "
+              f"Aspect: {self._min_aspect}-{self._max_aspect}")
+
+    def set_templates(self, templates: list[tuple[str, str, np.ndarray]],
+                      similarity: float = 0.3):
+        """註冊 bumper 顏色模板。
+
+        Args:
+            templates: [(label, alliance, histogram), ...] 每台機器人的直方圖
+            similarity: 相似度閾值 (0~1)
+        """
+        self._templates = list(templates)
+        self._template_similarity = similarity
+        if templates:
+            print(f"[INFO] Bumper 模板已註冊: {len(templates)} 台 "
+                  f"(閾值={similarity:.2f})")
+
+    def _match_template(self, frame: np.ndarray,
+                        x1: float, y1: float,
+                        x2: float, y2: float) -> tuple[str, str, float] | None:
+        """將候選 bbox 與所有模板比對，回傳最佳匹配。
+
+        Returns:
+            (label, alliance, similarity) 或 None（無匹配）
+        """
+        if not self._templates:
+            return None
+
+        h, w = frame.shape[:2]
+        ix1, iy1 = max(0, int(x1)), max(0, int(y1))
+        ix2, iy2 = min(w, int(x2)), min(h, int(y2))
+        if ix2 - ix1 < 5 or iy2 - iy1 < 5:
+            return None
+
+        roi = frame[iy1:iy2, ix1:ix2]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None,
+                            [16, 16], [0, 180, 0, 256])
+        cv2.normalize(hist, hist)
+        det_hist = hist.flatten()
+
+        best_label, best_alliance, best_sim = "", "", -1.0
+        for label, alliance, tmpl_hist in self._templates:
+            sim = cv2.compareHist(
+                det_hist.reshape(-1, 1).astype(np.float32),
+                tmpl_hist.reshape(-1, 1).astype(np.float32),
+                cv2.HISTCMP_CORREL)
+            if sim > best_sim:
+                best_label, best_alliance, best_sim = label, alliance, sim
+
+        if best_sim >= self._template_similarity:
+            return (best_label, best_alliance, best_sim)
+        return None
+
+    def _detect_color(self, hsv: np.ndarray, mask_low, mask_high,
+                      mask_low_2=None, mask_high_2=None,
+                      class_id: int = 0) -> list[tuple]:
+        """偵測單一顏色的 bumper。"""
+        mask = cv2.inRange(hsv, mask_low, mask_high)
+        if mask_low_2 is not None:
+            mask2 = cv2.inRange(hsv, mask_low_2, mask_high_2)
+            mask = cv2.bitwise_or(mask, mask2)
+
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel_close)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel_open)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+
+        results = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self._min_area or area > self._max_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            if h == 0:
+                continue
+
+            aspect = w / h
+            if aspect < self._min_aspect or aspect > self._max_aspect:
+                continue
+
+            # conf 用面積佔比模擬（越大的 bumper 越確定）
+            area_ratio = min(area / self._max_area, 1.0)
+            conf = 0.5 + 0.5 * area_ratio
+
+            results.append((
+                float(x), float(y),
+                float(x + w), float(y + h),
+                float(conf), class_id,
+            ))
+
+        return results
+
+    def detect(self, frame: np.ndarray,
+               confidence: float | None = None,
+               robot_only: bool = True) -> list[tuple]:
+        """偵測紅藍 bumper，回傳格式與 RobotDetectorONNX.detect() 一致。
+
+        Args:
+            frame: BGR 影像
+            confidence: 信心閾值（用於過濾小偵測）
+            robot_only: 忽略（HSV bumper 只偵測機器人）
+
+        Returns:
+            [(x1, y1, x2, y2, conf, class_id), ...]
+            class_id: 0=Red, 1=Blue
+        """
+        conf_thresh = confidence if confidence is not None else 0.3
+
+        blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+
+        # 偵測紅色和藍色 bumper
+        red_dets = self._detect_color(
+            hsv, self._red_low_1, self._red_high_1,
+            self._red_low_2, self._red_high_2, class_id=0)
+        blue_dets = self._detect_color(
+            hsv, self._blue_low, self._blue_high, class_id=1)
+
+        all_dets = red_dets + blue_dets
+
+        # 過濾低信心
+        all_dets = [d for d in all_dets if d[4] >= conf_thresh]
+
+        if not all_dets:
+            return []
+
+        # NMS 去重
+        boxes = [[float(d[0]), float(d[1]),
+                  float(d[2] - d[0]), float(d[3] - d[1])]
+                 for d in all_dets]
+        confs = [float(d[4]) for d in all_dets]
+        indices = cv2.dnn.NMSBoxes(boxes, confs, conf_thresh, self._nms_iou)
+
+        results = []
+        if len(indices) > 0:
+            for i in indices.flatten():
+                results.append(all_dets[i])
+
+        # 模板過濾：只保留匹配已註冊模板的候選
+        if self._templates and results:
+            filtered = []
+            for det in results:
+                match = self._match_template(
+                    frame, det[0], det[1], det[2], det[3])
+                if match:
+                    label, alliance, sim = match
+                    cls_id = 0 if alliance == "red" else 1
+                    filtered.append((
+                        det[0], det[1], det[2], det[3],
+                        det[4], cls_id,
+                    ))
+            if self._diag_count <= 3:
+                print(f"[DIAG] 模板過濾: {len(results)} → {len(filtered)} 個候選")
+            results = filtered
+
+        # 診斷
+        self._diag_count += 1
+        if self._diag_count <= 3:
+            n_red = sum(1 for d in results if d[5] == 0)
+            n_blue = sum(1 for d in results if d[5] == 1)
+            print(f"[DIAG] Bumper 偵測 幀{self._diag_count}: "
+                  f"Red={n_red} Blue={n_blue} total={len(results)}")
+
+        return results
+
+    def detect_tiled(self, frame: np.ndarray,
+                     confidence: float | None = None,
+                     robot_only: bool = True,
+                     tile_size: int = 1280,
+                     overlap: float = 0.15) -> list[tuple]:
+        """HSV 在全解析度上跑，detect() 已涵蓋 — tiled 回空避免重複偵測。"""
+        return []
+
+    def get_class_name(self, class_id: int) -> str:
+        if 0 <= class_id < len(self.class_names):
+            return self.class_names[class_id]
+        return f"class_{class_id}"
+
+    def is_robot_class(self, class_id: int) -> bool:
+        return 0 <= class_id < len(self.class_names)
+
+    def infer_alliance(self, class_id: int) -> str:
+        if class_id == 0:
+            return "red"
+        if class_id == 1:
+            return "blue"
+        return ""

@@ -25,6 +25,18 @@ except Exception:
     pass
 
 
+# 診斷計數器（首 N 幀列印詳細資訊）
+_diag_frame_count = 0
+_diag_total_detections = 0
+
+
+def reset_diagnostics():
+    """重設診斷計數器（每次分析前呼叫）。"""
+    global _diag_frame_count, _diag_total_detections
+    _diag_frame_count = 0
+    _diag_total_detections = 0
+
+
 def detect_yellow_balls(frame, hsv_low=None, hsv_high=None,
                         min_area=None, max_area=None):
     """
@@ -40,28 +52,68 @@ def detect_yellow_balls(frame, hsv_low=None, hsv_high=None,
     Returns:
         [(cx, cy, area, radius), ...]
     """
-    low = np.array(hsv_low or YELLOW_LOW)
-    high = np.array(hsv_high or YELLOW_HIGH)
+    global _diag_frame_count, _diag_total_detections
+
+    low = np.array(hsv_low or YELLOW_LOW, dtype=np.uint8)
+    high = np.array(hsv_high or YELLOW_HIGH, dtype=np.uint8)
     min_a = min_area if min_area is not None else MIN_BLOB_AREA
     max_a = max_area if max_area is not None else MAX_BLOB_AREA
 
+    # 診斷：首幀印出參數
+    _diag_frame_count += 1
+    is_diag_frame = _diag_frame_count <= 3
+
+    if _diag_frame_count == 1:
+        print(f"[DIAG] 球偵測 HSV: low={tuple(low)} high={tuple(high)} "
+              f"area={min_a}-{max_a} OpenCL={_USE_OPENCL}")
+
     # 影像處理（OpenCL GPU 加速：5 個操作全在 GPU 上執行）
-    src = cv2.UMat(frame) if _USE_OPENCL else frame
-    blurred = cv2.GaussianBlur(src, (5, 5), 0)
-    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, low, high)
+    try:
+        src = cv2.UMat(frame) if _USE_OPENCL else frame
+        blurred = cv2.GaussianBlur(src, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, low, high)
 
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
 
-    # findContours 不支援 GPU，下載 mask 到 CPU
-    if _USE_OPENCL:
-        mask = mask.get()
+        # findContours 不支援 GPU，下載 mask 到 CPU
+        if _USE_OPENCL:
+            mask = mask.get()
+    except cv2.error:
+        # OpenCL 失敗 → 回退 CPU
+        blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, low, high)
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        if _diag_frame_count == 1:
+            print("[WARN] OpenCL 處理失敗，已回退到 CPU")
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
+
+    # 診斷：首幾幀印出管線狀態
+    if is_diag_frame:
+        mask_px = cv2.countNonZero(mask)
+        all_areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)
+        print(f"[DIAG] 幀{_diag_frame_count}: mask={mask_px}px "
+              f"contours={len(contours)} "
+              f"top_areas={all_areas[:5]}")
+        if mask_px == 0:
+            # 取樣影像中心的 HSV 值幫助診斷
+            h, w = frame.shape[:2]
+            hsv_cpu = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            center_hsv = hsv_cpu[h // 2, w // 2]
+            print(f"[DIAG] ⚠ HSV mask 完全為空！影像中心 HSV={tuple(center_hsv)}")
+            print(f"[DIAG] 可能原因: HSV 範圍 {tuple(low)}-{tuple(high)} "
+                  "與影片中球的顏色不匹配")
+            print(f"[DIAG] 建議: 使用設定面板「HSV 校正」重新取色，"
+                  "或執行 python diagnose.py <video>")
 
     results = []
     for cnt in contours:
@@ -73,6 +125,14 @@ def detect_yellow_balls(frame, hsv_low=None, hsv_high=None,
                 cy = int(M["m01"] / M["m00"])
                 radius = int(np.sqrt(area / np.pi))
                 results.append((cx, cy, area, radius))
+
+    _diag_total_detections += len(results)
+
+    # 診斷：前 100 幀結束時的統計
+    if _diag_frame_count == 100 and _diag_total_detections == 0:
+        print("[WARN] ⚠⚠ 前 100 幀零球偵測！HSV 範圍很可能需要重新校正。")
+        print("[WARN] 請執行: python diagnose.py <影片路徑> --save-images")
+
     return results
 
 

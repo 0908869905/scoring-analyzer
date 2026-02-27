@@ -1,5 +1,256 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-02-27
+
+### 完成項目
+- [x] **背景模型取代手動場地遮罩** — 新建 `background.py`（`BackgroundModel` 類別，Temporal Median 背景提取）
+  - 均勻取樣影片幀 → 像素中位數 → 靜態背景圖 → absdiff → 閾值化 → 前景遮罩
+  - 自動排除觀眾席/記分板等非場地靜態區域，無需手動繪製場地邊界
+  - `config.py` 新增 `BG_SAMPLE_COUNT=50`, `BG_FG_THRESHOLD=30`, `BG_DILATE_KERNEL=5`
+  - `runtime_config.py` 新增對應 dataclass 欄位
+  - `app.py` 移除所有 `_field_boundary` 相關程式碼（按鈕、互動、繪製、遮罩建立），新增 `_bg_model` + 自動背景模型建立 + 每幀前景遮罩
+  - `robot_tracker.py` 移除 `field_boundary` 參數和 `point_in_polygon` 過濾
+  - Debug 4-panel 左上改顯示前景遮罩（取代原場地遮罩面板）
+- [x] **Bumper 取色偵測設計計劃** — `docs/plans/2026-02-27-bumper-color-pick-design.md`
+  - 設計：用戶在影片上點擊機器人 bumper 多次 → 建立 HSV 直方圖模板 → 分析時只追蹤匹配模板的候選
+  - 取代現有的框選機器人標記方式
+  - 修改範圍：`calibration.py`, `robot_detection.py`, `app.py`, `config.py`, `runtime_config.py`
+  - 尚未實作，僅計劃完成
+
+### 修改檔案
+- `background.py` — **新建** — `BackgroundModel` 類別（Temporal Median 背景提取 + 前景遮罩生成）
+- `config.py` — 新增 `BG_SAMPLE_COUNT`, `BG_FG_THRESHOLD`, `BG_DILATE_KERNEL` 背景模型參數
+- `runtime_config.py` — 新增背景模型對應的 dataclass 欄位
+- `app.py` — 移除 `_field_boundary` 全部相關程式碼，新增 `_bg_model` 背景模型整合 + 自動建立 + 每幀前景遮罩
+- `robot_tracker.py` — 移除 `field_boundary` 參數和 `point_in_polygon` 過濾邏輯
+- `docs/plans/2026-02-27-bumper-color-pick-design.md` — **新建** — Bumper 取色偵測實作計劃
+
+### 5-Question Reboot Check
+1. **做什麼？** 用 Temporal Median 背景模型自動取代手動場地邊界繪製，並設計 Bumper 取色偵測計劃
+2. **進度？** 背景模型已完整實作並整合。Bumper 取色偵測計劃已寫好，尚未開始實作
+3. **下一步？** 按照 `docs/plans/2026-02-27-bumper-color-pick-design.md` 實作 Bumper 取色偵測（Task 1-5），取代現有的框選機器人標記方式
+4. **阻礙？** 需用實際影片驗證背景模型效果（是否正確分離前景/背景、是否比手動場地遮罩效果好）
+5. **檔案？** `background.py`（背景模型）、`app.py`（整合）、`docs/plans/2026-02-27-bumper-color-pick-design.md`（下一步計劃）、`calibration.py` + `robot_detection.py`（Bumper 取色待修改）
+
+---
+
+## Session: 2026-02-26
+
+### 完成項目
+- [x] **深度研究 FRC 機器人偵測資料集** — 搜尋 Roboflow/GitHub/Chief Delphi/Kaggle，確認無 2017 Steamworks 或 2026 ReBuilt 機器人偵測資料集存在
+- [x] **HSV Bumper 偵測器設計** — 設計文件 `docs/plans/2026-02-26-hsv-bumper-detection-design.md`
+- [x] **BumperDetectorHSV 實作** — 完整 HSV 色彩過濾偵測紅藍 bumper（`robot_detection.py`）
+  - 紅色 hue 環繞處理（兩段 inRange OR 合併）
+  - 矩形 morphology 核（9x5 Close + 5x3 Open）適合水平 bumper
+  - 面積 + 長寬比過濾 + NMS 去重
+  - 與 RobotDetectorONNX 完全同介面（drop-in replacement）
+- [x] **偵測模式切換** — `config.py` 新增 `ROBOT_DETECTION_MODE = "HSV"` 預設值，`app.py` 支援 HSV/YOLO 切換
+- [x] **程式碼審查修復** — 修復 3 個問題：
+  - tuple 參數 falsy-check 改為 `is not None`
+  - `class_names` 從 mutable list 改為 immutable tuple
+  - `detect_tiled()` 回空避免 4K 重複偵測
+
+### 修改檔案
+- `config.py` — 新增 `ROBOT_DETECTION_MODE`、`BUMPER_RED_*`、`BUMPER_BLUE_*`、`BUMPER_MIN/MAX_AREA/ASPECT`、`BUMPER_NMS_IOU`
+- `robot_detection.py` — 新增 `BumperDetectorHSV` 類別（line 368-533）
+- `app.py` — 偵測器初始化邏輯改為 config-based 模式切換
+- `docs/plans/2026-02-26-hsv-bumper-detection-design.md` — 設計文件
+- `FINDINGS.md` — 更新研究結果（資料集搜尋、準確度分析）
+
+### 5-Question Reboot Check
+1. **做什麼？** 用 HSV 色彩過濾偵測紅藍 bumper 取代 YOLO 機器人偵測（不需訓練資料，跨年份通用）
+2. **進度？** 程式碼完成 + 合成影像測試通過 + 程式碼審查修復完成
+3. **下一步？** 用實際 FRC 比賽影片測試 HSV Bumper 偵測效果，調整 HSV 參數（可能需要降低飽和度閾值、調整面積範圍）；之後考慮加入設定面板的偵測模式切換
+4. **阻礙？** 需要用實際影片驗證 — 場地燈光、攝影機曝光、bumper 磨損等都可能影響偵測率
+5. **檔案？** `robot_detection.py`（BumperDetectorHSV）、`config.py`（BUMPER_* 參數）、`app.py`（偵測器初始化）
+
+---
+
+## Session: 2026-02-25
+
+### 完成項目
+- [x] **應用啟動測試** — 多次啟動 `python main.py` 載入影片驗證應用正常運作
+- [x] **升級模型 YOLOv11n → YOLOv26n** — 更新訓練腳本和 Colab notebook，將機器人偵測模型從 YOLOv11n 升級到 YOLOv26n
+  - `train_robot_model.py` 預設模型 `--model` 從 `yolo11n` 改為 `yolo26n`（docstring 範例也更新）
+  - `train_colab.ipynb` 標題改為 "YOLOv26n"、訓練 cell 的 `YOLO("yolo11n.pt")` 改為 `YOLO("yolo26n.pt")`
+  - `robot_detection.py` 已支援 YOLOv26 的 NMS-Free 輸出格式 `(1, N, 6)`，無需修改
+
+### 修改檔案
+- `train_robot_model.py` — `--model` 預設值 `yolo11n` → `yolo26n`；docstring 範例更新
+- `train_colab.ipynb` — 標題和 Cell 10 模型名稱 `yolo11n` → `yolo26n`
+
+### 5-Question Reboot Check
+1. **做什麼？** 將機器人偵測模型從 YOLOv11n 升級到 YOLOv26n，以獲得更好的偵測精度
+2. **進度？** 訓練腳本和 Colab notebook 已更新完成。模型尚未重新訓練
+3. **下一步？** 到 Google Colab 用 T4 GPU 執行 `train_colab.ipynb` 重新訓練 YOLOv26n 模型 → 下載新的 `frc_robot.onnx` → 用實際影片驗證偵測精度是否提升
+4. **阻礙？** 需要到 Colab 執行訓練（本機無 GPU）；YOLOv26 是否在 Colab T4 上順利訓練尚未驗證
+5. **檔案？** `train_colab.ipynb`（Colab 訓練 notebook）、`train_robot_model.py`（訓練腳本）、`robot_detection.py`（偵測器，已支援 NMS-Free 格式）、`models/frc_robot.onnx`（待重新訓練產出）
+
+---
+
+## Session: 2026-02-24 (2)
+
+### 完成項目
+- [x] **場地遮罩座標雙重偏移 Bug 修復** — ROI 裁切後 `_field_boundary` 已儲存 ROI 相對座標 (0..rw, 0..rh)，但 `_run_analysis()` 建立遮罩時又減去 ROI 偏移 `(rx, ry)`，導致多邊形座標變成負數 → 遮罩全為零 → 整幀變黑 → 球偵測和機器人偵測全部為 0
+
+### 修改檔案
+- `app.py` — 第 1922-1928 行，移除 ROI 分支中不必要的 `(rx, ry)` 座標偏移，直接使用 `_field_boundary` 座標建立遮罩
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復場地遮罩座標雙重偏移導致球偵測和機器人偵測全部為 0 的嚴重 Bug
+2. **進度？** 已修復。移除 ROI 分支中多餘的座標偏移，遮罩正確覆蓋場地區域
+3. **下一步？** 用實際影片端到端驗證：(1) ROI 裁切 + 場地遮罩是否正常運作 (2) 球偵測數量恢復正常 (3) 機器人偵測數量恢復正常 (4) 進球判定和射手歸因流程完整通過
+4. **阻礙？** 無明確阻礙；需實際影片驗證修復效果
+5. **檔案？** `app.py`（場地遮罩建立邏輯，`_run_analysis()` 方法中約第 1922 行附近）
+
+---
+
+## Session: 2026-02-24
+
+### 完成項目
+- [x] **P0-2: Color Histogram Re-ID** — `robot_tracker.py`: `_extract_histogram()` HSV H+S 16x16 bins, EMA 70/30 update, `_compare_histograms()`, `effective_dist = spatial_dist * (1 + 0.4 * (1 - similarity))` 在 `_match_direct()` 中加權距離匹配
+- [x] **P1-3: 前置場地遮罩 (Field Pre-masking)** — `app.py`: 分析前用 `cv2.fillPoly` + `cv2.bitwise_and` 將場地外像素設為黑色，偵測器只處理場地內區域，減少假陽性
+- [x] **P1-4: 追蹤信心度視覺化** — `robot_tracker.py` 新增 `_detected_frames` dict 追蹤每個 label 的真實偵測幀；`app.py` overlay 區分：實線粗框=真實偵測、細線灰框=插值推測
+- [x] **P1-5: Per-robot 計數 overlay** — `app.py`: `_cumulative_goals` 預計算每幀每機器人累計進球數，播放時底部顯示即時進球計數列（類似 5951 的 "Robot N: X" 計數欄）
+- [x] **P2-6: Velocity Prediction** — `robot_tracker.py`: `_last_known` 擴展為 `(f, cx, cy, cls, vx, vy)`，`_match_direct()` 使用預測位置（而非最後已知位置）計算匹配距離
+- [x] **P2-7: 4-Panel Debug View** — `app.py`: F3 快捷鍵切換 4 面板佈局：Field Mask / Ball Ownership / Robot Detection / Full Overlay
+
+### 修改檔案
+- `config.py` — 新增 `BALL_OWNERSHIP_DIST=200`（球所有權判定距離）、`MOT_HISTOGRAM_WEIGHT=0.4`（直方圖加權係數）
+- `scoring.py` — 新增 `compute_ball_ownership()`（球所有權生命週期追蹤）、`_get_ball_owner_at_frame()`；修改 `detect_shots()` 和 `reattribute_shooters()` 使用 3 層歸因（HP > Ownership > Proximity）
+- `robot_tracker.py` — 新增 `_extract_histogram()`（HSV H+S 16x16 bins）、`_compare_histograms()`（cv2.compareHist CORREL）、`_detected_frames` dict；`_last_known` 擴展含速度 `(vx, vy)`；`_match_direct()` 加入直方圖加權距離 + 速度預測位置
+- `app.py` — 前置場地遮罩（`cv2.fillPoly` + `cv2.bitwise_and`）、追蹤信心度視覺化（實線/細線灰框）、per-robot 計數 overlay（`_cumulative_goals`）、4-panel debug view（F3 toggle）、`_robot_detected_frames` 傳遞
+
+### 5-Question Reboot Check
+1. **做什麼？** 實作競品分析後的 P0-P2 共 6 項改進（P0 Ball Ownership 在上一 session 完成），涵蓋 Re-ID、場地遮罩、視覺化、速度預測、debug 面板
+2. **進度？** 全部完成並通過單元測試和匯入驗證。7 項功能（含上 session 的 Ball Ownership）全部實作完畢
+3. **下一步？** 用實際影片端到端驗證：(1) Color Histogram Re-ID 是否降低 ID swap 和碎片化 (2) Ball Ownership 3 層歸因是否提升射手歸因率至 80%+ (3) 場地遮罩是否減少場外誤框 (4) 速度預測在高速移動場景的匹配改善 (5) 4-panel debug view 的調參效率
+4. **阻礙？** 無明確阻礙；所有功能已實作，需實際影片驗證效果和調參
+5. **檔案？** `robot_tracker.py`（histogram Re-ID + velocity prediction + detected_frames）、`scoring.py`（ball ownership + 3-tier attribution）、`app.py`（field mask + confidence viz + per-robot count + debug view）、`config.py`（BALL_OWNERSHIP_DIST + MOT_HISTOGRAM_WEIGHT）
+
+---
+
+## Session: 2026-02-23 (4)
+
+### 完成項目
+- [x] 射手歸因距離放大 — `SCORE_MAX_SHOOTER_DIST` 300→500（4K 下球射出到 Hub 距離常超 300px）
+- [x] 合併策略放寬 — 新增 `MOT_MERGE_MAX_OVERLAP`=15（原 5 幀太短）、`MOT_MERGE_SEARCH_WINDOW`=180（原 ±60 幀放寬到 ±180 幀 ≈ ±3 秒）、`MOT_MERGE_BOUNDARY_DIST`=800（可配置化）
+- [x] app.py 整合 `reattribute_shooters()` — 在 `detect_shots()` 後呼叫，與 `test_analysis.py` 流程對齊
+- [x] Blue 追蹤品質 — 確認根因是訓練資料不足（confidence ~0.11），修改 1 和修改 2 的放寬可間接提升
+
+### 修改檔案
+- `config.py` — `SCORE_MAX_SHOOTER_DIST` 300→500；新增 `MOT_MERGE_MAX_OVERLAP`=15、`MOT_MERGE_BOUNDARY_DIST`=800、`MOT_MERGE_SEARCH_WINDOW`=180
+- `robot_tracker.py` — import 新增 3 個 `MOT_MERGE_*` 常數；`merge_fragmented_labels()` 改用 `MOT_MERGE_MAX_OVERLAP`；`_check_boundary_distance()` 改用 `MOT_MERGE_SEARCH_WINDOW` 和 `MOT_MERGE_BOUNDARY_DIST`
+- `app.py` — `_run_analysis()` 在 `detect_shots()` 後新增 `reattribute_shooters()` 呼叫
+
+### 5-Question Reboot Check
+1. **做什麼？** 4 項待處理修復：射手歸因距離、合併策略放寬、Blue 追蹤品質、app.py 整合 reattribute
+2. **進度？** 全部完成。參數已調整，app.py 已整合 reattribute_shooters()，需實際影片驗證效果
+3. **下一步？** 用實際影片驗證：(1) 射手歸因率是否從 47% 提升 (2) Red labels 是否從 7→3 (3) Blue 合併效果 (4) 長期：補充 Blue 訓練資料重新訓練模型
+4. **阻礙？** Blue 追蹤品質根因是模型訓練資料不足，無法僅靠參數調整根本解決
+5. **檔案？** `config.py`（距離+合併參數）、`robot_tracker.py`（合併邏輯）、`app.py`（reattribute 整合）
+
+---
+
+## Session: 2026-02-23 (3)
+
+### 完成項目
+- [x] 進球判定測試 — 用 `test_analysis.py` 對影片前 20 秒進行互動式 Hub 區域框選 + 進球判定測試，揭示射手歸因率極低和 ID 碎片化兩個問題
+- [x] 射手歸因修復 — `scoring.py` 新增 `reattribute_shooters()` 後處理方法，用合併+插值後的完整 `robot_positions_by_frame` 重新歸因所有進球事件的射手
+- [x] ID 碎片化修復 — `robot_tracker.py` 重寫 `merge_fragmented_labels()` 為迭代式合併 + 允許最多 5 幀重疊 + 拆分為子方法（`_find_merge_candidates()`、`_check_boundary_distance()`、`_execute_merges()`）
+
+### 修改檔案
+- `scoring.py` — 新增 `reattribute_shooters()` 方法（後處理射手歸因，用完整的合併+插值後機器人位置資料重新匹配）
+- `robot_tracker.py` — 重寫 `merge_fragmented_labels()` 為迭代式 + 允許小重疊（max 5 幀）+ 拆分為 `_find_merge_candidates()`、`_check_boundary_distance()`、`_execute_merges()` 三個子方法
+- `test_analysis.py` — 在後處理階段加入 `engine.reattribute_shooters()` 呼叫
+
+### 測試結果
+測試影片：`e:\FRC模擬賽第二天\A001_02131614_C025.mov`，3840x2160, 60fps, 前20秒
+
+| 指標 | 修改前 | 修改後 |
+|------|--------|--------|
+| 射手歸因 | 3/42 (7%) | 20/43 (47%) |
+| ID Stability | FAIR (11 stable) | GOOD (8 stable) |
+| Unique Labels | 14 (Red:9, Blue:5) | 11 (Red:7, Blue:4) |
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復射手歸因失敗（`_find_shooter()` 無法在偵測空洞幀找到機器人）+ 修復 ID 碎片化（`merge_fragmented_labels()` 合併策略過嚴）
+2. **進度？** 兩個問題均已修復。射手歸因率 7%→47%，ID 穩定性 FAIR→GOOD。但 47% 歸因率仍有提升空間
+3. **下一步？** (1) 調大 `SCORE_MAX_SHOOTER_DIST`（當前 300px 在 4K 偏小，未知事件多在 300-400px 間）(2) Red 仍有 7 個 label（期望 3），需調大重疊容忍或改進合併距離判斷 (3) Blue 追蹤品質差（模型 confidence 低），需更多訓練資料 (4) 主 GUI `app.py` 整合 `reattribute_shooters()` 呼叫
+4. **阻礙？** 射手歸因率受限於 `SCORE_MAX_SHOOTER_DIST`（需 4K 影片實測確定最佳值）；Blue 偵測品質受限於訓練資料不足
+5. **檔案？** `scoring.py`（`reattribute_shooters()`）、`robot_tracker.py`（`merge_fragmented_labels()` + 子方法）、`test_analysis.py`（驗證工具）、`config.py`（`SCORE_MAX_SHOOTER_DIST`）
+
+---
+
+## Session: 2026-02-23 (2)
+
+### 完成項目
+- [x] ByteTrack 繞過 — 完全重寫 MOT 追蹤邏輯，繞過 ByteTrack（IoU 匹配在 4K@60fps 完全失效），改用距離式直接匹配 `_match_direct()`
+- [x] 全域最短距離匹配 — 距離矩陣 + 貪心最短優先（取代順序依賴的逐一匹配）
+- [x] 動態距離閾值 — 依幀間隔縮放 ReID 距離（`base * (1 + sqrt(gap/fps))`）
+- [x] 混合偵測 — 全幀偵測每幀 + tiled 偵測每 N 幀，NMS 去重
+- [x] 後處理 label 合併 — `merge_fragmented_labels()` 合併碎片化的追蹤 label
+- [x] Blue 機器人偵測 — 降低閾值 ROBOT_DETECTION_CONFIDENCE 0.25→0.10，對齊 BYTETRACK_TRACK_THRESH
+- [x] test_analysis.py 增強 — 互動式 Hub 區域框選、出手偵測、合併統計、ID 穩定性評估
+
+### 修改檔案
+- `config.py` — ROBOT_DETECTION_CONFIDENCE 0.25→0.10, BYTETRACK_TRACK_THRESH 0.25→0.10, BYTETRACK_MATCH_THRESH 0.8→0.3, BYTETRACK_MIN_CONSECUTIVE 3→1, 新增 MOT_DETECT_INTERVAL=10, MOT_REID_MAX_DIST=400(動態縮放), MOT_MIN_TRACK_FRAMES=3
+- `robot_tracker.py` — 完全重寫 _MOTTracker：_match_direct(), _match_bytetrack(), _allocate_label(), merge_fragmented_labels(), 混合偵測
+- `robot_detection.py` — tile overlap 0.2→0.15
+- `test_analysis.py` — 互動式 zone drawing, --no-zones flag, detect_shots() 呼叫, 後處理統計
+- `app.py` — 新增 merge_fragmented_labels() 呼叫
+
+### 測試結果
+測試影片：3840x2160, 60fps, 前20秒
+
+| 指標 | 修復前 (ByteTrack) | 修復後 |
+|------|-------------------|--------|
+| Ball 偵測 | 26044 (100%) | 26044 (100%) |
+| Robot 原始偵測 | 11 | 1000 |
+| Robot 插值後 | 11 | 4521 |
+| Robot 幀覆蓋率 | 5.4% | 100% |
+| Blue labels | 0 | 5 (2 stable) |
+| 出手偵測 | 3 | 59 |
+| ID 穩定性 | POOR (18) | FAIR (11 stable) |
+| 速度 | 1 fps | 5.4 fps |
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復 4K@60fps 機器人追蹤失效（ByteTrack IoU 失效 + Blue 機器人閾值過高）
+2. **進度？** 核心問題已修復。Robot 幀覆蓋率 5.4%→100%，Blue 機器人從 0 到 5 labels。ID 穩定性從 POOR 提升到 FAIR
+3. **下一步？** (1) ID 穩定性優化 — 11 stable labels 仍多於期望的 ≤6，需更好的 ReID 或更進階的 label 合併策略 (2) 進球偵測 — 用互動式 zone drawing 測試完整進球判定流程 (3) 主 GUI 整合測試 — app.py 尚未完整測試新追蹤邏輯 (4) Blue 機器人模型品質 — confidence ~0.11 偏低，可能需補充訓練資料
+4. **阻礙？** ID 穩定性需更好的模型或 ReID 特徵；Blue 偵測覆蓋率受限於模型品質
+5. **檔案？** `robot_tracker.py`（_match_direct + merge_fragmented_labels）、`config.py`（MOT_* 參數）、`test_analysis.py`（驗證工具）、`app.py`（merge 呼叫整合）
+
+---
+
+## Session: 2026-02-23
+
+### 完成項目
+- [x] 球偵測失效修復 — MAX_BLOB_AREA 10000->50000（4K 影片球面積超過上限被過濾）、GaussianBlur(5,5) 預處理改善運動模糊偵測、形態學從 Open->Close 改為 Close->Open（先補洞再去噪），核大小 Close(7,7)+Open(3,3)
+- [x] GPU 加速 — OpenCL UMat GPU 加速球偵測（5 個影像處理操作全在 GPU 執行）、ONNX Provider 加入 DmlExecutionProvider（CUDA > DML > CPU 自動選擇）
+- [x] ONNX Provider 診斷 — robot_detection.py 和 detection.py 的 __init__ 印出實際使用的 Provider + 類別名稱
+- [x] 分析管線診斷日誌 — _run_analysis() 每 100 幀輸出球/機器人偵測統計，分析結束印出總計
+- [x] MOT 自動偵測模式 — _MOTTracker 加入 auto_mode，未標記的 tracker_id 自動分配 Red-N/Blue-N label；RobotTrackerManager 加入 enable_auto_mode() 和 robot_info property；app.py 未標記機器人但 MOT 可用時自動啟用，分析後將自動偵測的機器人加入 _robot_markers
+- [x] 用戶 GPU 環境確認 — NVIDIA GeForce RTX 3050 Ti Laptop GPU，安裝 onnxruntime-directml，確認 DmlExecutionProvider 啟用成功
+
+### 修改檔案
+- `config.py` — MAX_BLOB_AREA 10000->50000（4K 支援）
+- `detection.py` — OpenCL UMat GPU 加速 + GaussianBlur 預處理 + 形態學 Close->Open 改善 + DmlExecutionProvider + Provider 診斷 print
+- `robot_detection.py` — DmlExecutionProvider 加入 provider 列表 + __init__ 診斷 print
+- `robot_tracker.py` — MOT 自動偵測模式（auto_mode、enable_auto_mode()、robot_info property）
+- `app.py` — 分析管線診斷日誌（每 100 幀統計）+ MOT 自動模式啟用 + auto_robots 傳遞至 _robot_markers
+- `requirements.txt` — 加入 onnxruntime-gpu / onnxruntime-directml 安裝說明
+- `README.md` — 架構更新 + 模型訓練指南
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復 4K 影片球偵測失效 + GPU 加速 + MOT 自動偵測模式
+2. **進度？** 全部完成。球偵測已修復（MAX_BLOB_AREA + 形態學改善），DML GPU 加速已啟用，MOT auto_mode 可自動分配機器人 label
+3. **下一步？** 用實際比賽影片端到端驗證：球偵測精度（4K 下 HSV + GaussianBlur）→ MOT 自動模式的 Red-N/Blue-N 分配是否正確 → 進球判定 + 出手偵測 + 命中率統計 → 調整 ByteTrack 參數
+4. **阻礙？** 無明確阻礙；需實際影片驗證各模組整合效果
+5. **檔案？** `detection.py`（球偵測 + OpenCL UMat）、`robot_tracker.py`（MOT auto_mode）、`app.py`（診斷日誌 + auto_mode 整合）、`config.py`（MAX_BLOB_AREA）
+
+---
+
 ## Session: 2026-02-21
 
 ### 完成項目
@@ -279,4 +530,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-02-21*
+*Last updated: 2026-02-27*

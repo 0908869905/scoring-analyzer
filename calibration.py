@@ -168,3 +168,57 @@ def generate_preview(
     mask_colored[mask > 0] = [0, 200, 255]  # BGR 黃色
 
     return mask_colored, len(balls), balls
+
+
+def build_bumper_template(
+    frame: np.ndarray,
+    points: list[tuple[int, int]],
+    patch_radius: int = 20,
+) -> tuple[np.ndarray, str]:
+    """
+    從用戶取色點建立 bumper 顏色直方圖模板。
+
+    Args:
+        frame: BGR 影像
+        points: [(x, y), ...] 用戶點擊的 bumper 位置
+        patch_radius: 取樣半徑（像素）
+
+    Returns:
+        (histogram, alliance) — histogram 為正規化 HSV H+S 16x16 直方圖，
+        alliance 為自動判斷的聯盟 ("red" / "blue" / "")
+    """
+    if not points:
+        raise ValueError("至少需要一個取樣點")
+
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    all_patches = []
+    hue_values = []
+    for px, py in points:
+        x1 = max(0, px - patch_radius)
+        y1 = max(0, py - patch_radius)
+        x2 = min(w, px + patch_radius)
+        y2 = min(h, py + patch_radius)
+        patch = hsv[y1:y2, x1:x2]
+        all_patches.append(patch)
+        hue_values.extend(patch[:, :, 0].flatten().tolist())
+
+    # 合併所有 patch 計算 H+S 直方圖
+    combined = np.vstack([p.reshape(-1, 3) for p in all_patches])
+    combined_hsv = combined.reshape(-1, 1, 3).astype(np.uint8)
+    hist = cv2.calcHist([combined_hsv], [0, 1], None,
+                        [16, 16], [0, 180, 0, 256])
+    cv2.normalize(hist, hist)
+    histogram = hist.flatten()
+
+    # 自動判斷聯盟：從 hue 中位數推斷
+    median_hue = np.median(hue_values)
+    if median_hue <= 10 or median_hue >= 170:
+        alliance = "red"
+    elif 100 <= median_hue <= 130:
+        alliance = "blue"
+    else:
+        alliance = ""
+
+    return histogram, alliance
