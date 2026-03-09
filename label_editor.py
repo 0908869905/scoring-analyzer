@@ -50,6 +50,7 @@ class LabelEditor(ctk.CTk):
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._pil_img: Optional[Image.Image] = None
         self._dirty = False
+        self._undo_stack: list[tuple[int, list[list]]] = []
 
         self._drag_action = None  # "move", "resize", "draw", None
         self._drag_handle = -1    # which handle (0-7)
@@ -74,6 +75,7 @@ class LabelEditor(ctk.CTk):
         self.bind("f", lambda e: self._fit_view())
         self.bind("F", lambda e: self._fit_view())
         self.bind("<Control-s>", lambda e: self._save_labels())
+        self.bind("<Control-z>", lambda e: self._undo())
 
         # Mouse
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -86,6 +88,9 @@ class LabelEditor(ctk.CTk):
         self.canvas.bind("<B2-Motion>", self._on_pan_move)
         self.canvas.bind("<ButtonPress-3>", self._on_pan_start)
         self.canvas.bind("<B3-Motion>", self._on_pan_move)
+
+        # Resize
+        self.canvas.bind("<Configure>", lambda e: self._on_canvas_resize(e))
 
     def _build_toolbar(self):
         tb = ctk.CTkFrame(self, height=40)
@@ -274,11 +279,27 @@ class LabelEditor(ctk.CTk):
 
     def _delete_selected(self):
         if 0 <= self.selected < len(self.labels):
+            # Save undo state
+            self._undo_stack.append((self.idx, [list(l) for l in self.labels]))
             self.labels.pop(self.selected)
             self.selected = -1
             self._dirty = True
             self._redraw()
             self._update_ui()
+
+    def _undo(self):
+        if self._undo_stack:
+            undo_idx, undo_labels = self._undo_stack.pop()
+            if undo_idx == self.idx:
+                self.labels = undo_labels
+                self.selected = -1
+                self._dirty = True
+                self._redraw()
+                self._update_ui()
+
+    def _on_canvas_resize(self, event):
+        if self._pil_img is not None:
+            self._redraw()
 
     def _toggle_class(self):
         if 0 <= self.selected < len(self.labels):
