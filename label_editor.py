@@ -299,7 +299,9 @@ class LabelEditor(ctk.CTk):
 
     def _on_canvas_resize(self, event):
         if self._pil_img is not None:
+            self._fit_zoom()
             self._redraw()
+            self._update_ui()
 
     def _toggle_class(self):
         if 0 <= self.selected < len(self.labels):
@@ -386,8 +388,11 @@ class LabelEditor(ctk.CTk):
             dy = (cy - self._drag_start[1]) / self.zoom
             iw, ih = self._pil_img.size
             orig = self._drag_orig
-            self.labels[self.selected][1] = orig[1] + dx / iw
-            self.labels[self.selected][2] = orig[2] + dy / ih
+            bw, bh = orig[3], orig[4]
+            new_cx = orig[1] + dx / iw
+            new_cy = orig[2] + dy / ih
+            self.labels[self.selected][1] = max(bw / 2, min(1 - bw / 2, new_cx))
+            self.labels[self.selected][2] = max(bh / 2, min(1 - bh / 2, new_cy))
             self._dirty = True
             self._redraw()
 
