@@ -51,10 +51,41 @@ class LabelEditor(ctk.CTk):
         self._pil_img: Optional[Image.Image] = None
         self._dirty = False
 
+        self._drag_action = None  # "move", "resize", "draw", None
+        self._drag_handle = -1    # which handle (0-7)
+        self._drag_start = (0, 0) # canvas coords at press
+        self._drag_orig = None    # original bbox values at press start
+        self._pan_last = (0, 0)
+
         self._build_toolbar()
         self._build_canvas()
         self._build_statusbar()
         self._load_current()
+
+        # ── Bindings ──
+        self.bind("<Left>", lambda e: self._prev())
+        self.bind("<Right>", lambda e: self._next())
+        self.bind("<Delete>", lambda e: self._delete_selected())
+        self.bind("<BackSpace>", lambda e: self._delete_selected())
+        self.bind("<Tab>", lambda e: self._toggle_class())
+        self.bind("<Escape>", lambda e: self._set_mode("select"))
+        self.bind("d", lambda e: self._set_mode("draw"))
+        self.bind("D", lambda e: self._set_mode("draw"))
+        self.bind("f", lambda e: self._fit_view())
+        self.bind("F", lambda e: self._fit_view())
+        self.bind("<Control-s>", lambda e: self._save_labels())
+
+        # Mouse
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<MouseWheel>", self._on_scroll)
+
+        # Pan (middle mouse or right click)
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonPress-3>", self._on_pan_start)
+        self.canvas.bind("<B3-Motion>", self._on_pan_move)
 
     def _build_toolbar(self):
         tb = ctk.CTkFrame(self, height=40)
@@ -227,6 +258,205 @@ class LabelEditor(ctk.CTk):
         self._auto_save()
         self.idx = (self.idx + 1) % len(self.images)
         self._load_current()
+
+    def _set_mode(self, mode: str):
+        self.mode = mode
+        if mode == "select":
+            self.canvas.config(cursor="")
+        else:
+            self.canvas.config(cursor="crosshair")
+        self._update_ui()
+
+    def _fit_view(self):
+        self._fit_zoom()
+        self._redraw()
+        self._update_ui()
+
+    def _delete_selected(self):
+        if 0 <= self.selected < len(self.labels):
+            self.labels.pop(self.selected)
+            self.selected = -1
+            self._dirty = True
+            self._redraw()
+            self._update_ui()
+
+    def _toggle_class(self):
+        if 0 <= self.selected < len(self.labels):
+            self.labels[self.selected][0] = 1 - self.labels[self.selected][0]
+            self._dirty = True
+            self._redraw()
+            self._update_ui()
+        return "break"  # prevent Tab from changing focus
+
+    def _hit_test_handle(self, cx, cy) -> tuple[int, int]:
+        """Check if (cx, cy) hits a resize handle.
+        Returns (bbox_index, handle_index) or (-1, -1).
+        handle order: TL=0, TC=1, TR=2, ML=3, MR=4, BL=5, BC=6, BR=7
+        """
+        if self.selected < 0 or self.selected >= len(self.labels):
+            return -1, -1
+
+        cls, bcx, bcy, bw, bh = self.labels[self.selected]
+        x1, y1, x2, y2 = self._yolo_to_pixel(bcx, bcy, bw, bh)
+        cx1, cy1 = self._img_to_canvas(x1, y1)
+        cx2, cy2 = self._img_to_canvas(x2, y2)
+
+        handles = [
+            (cx1, cy1), ((cx1+cx2)/2, cy1), (cx2, cy1),
+            (cx1, (cy1+cy2)/2),              (cx2, (cy1+cy2)/2),
+            (cx1, cy2), ((cx1+cx2)/2, cy2), (cx2, cy2),
+        ]
+        hs = HANDLE_SIZE + 3
+        for i, (hx, hy) in enumerate(handles):
+            if abs(cx - hx) <= hs and abs(cy - hy) <= hs:
+                return self.selected, i
+        return -1, -1
+
+    def _hit_test_bbox(self, cx, cy) -> int:
+        """Check if (cx, cy) hits any bbox. Returns index or -1."""
+        ix, iy = self._canvas_to_img(cx, cy)
+
+        for i in range(len(self.labels) - 1, -1, -1):
+            cls, bcx, bcy, bw, bh = self.labels[i]
+            x1, y1, x2, y2 = self._yolo_to_pixel(bcx, bcy, bw, bh)
+            if x1 <= ix <= x2 and y1 <= iy <= y2:
+                return i
+        return -1
+
+    def _on_press(self, event):
+        cx, cy = event.x, event.y
+
+        if self.mode == "draw":
+            self._drag_action = "draw"
+            self._drag_start = (cx, cy)
+            return
+
+        # Check handle first (resize)
+        bi, hi = self._hit_test_handle(cx, cy)
+        if bi >= 0:
+            self._drag_action = "resize"
+            self._drag_handle = hi
+            self._drag_start = (cx, cy)
+            self._drag_orig = list(self.labels[bi])
+            return
+
+        # Check bbox (select + move)
+        bi = self._hit_test_bbox(cx, cy)
+        if bi >= 0:
+            self.selected = bi
+            self._drag_action = "move"
+            self._drag_start = (cx, cy)
+            self._drag_orig = list(self.labels[bi])
+            self._redraw()
+            self._update_ui()
+            return
+
+        # Click on empty = deselect
+        self.selected = -1
+        self._drag_action = None
+        self._redraw()
+        self._update_ui()
+
+    def _on_drag(self, event):
+        cx, cy = event.x, event.y
+
+        if self._drag_action == "move" and self.selected >= 0:
+            dx = (cx - self._drag_start[0]) / self.zoom
+            dy = (cy - self._drag_start[1]) / self.zoom
+            iw, ih = self._pil_img.size
+            orig = self._drag_orig
+            self.labels[self.selected][1] = orig[1] + dx / iw
+            self.labels[self.selected][2] = orig[2] + dy / ih
+            self._dirty = True
+            self._redraw()
+
+        elif self._drag_action == "resize" and self.selected >= 0:
+            self._do_resize(cx, cy)
+
+        elif self._drag_action == "draw":
+            self._redraw()
+            self.canvas.create_rectangle(
+                self._drag_start[0], self._drag_start[1], cx, cy,
+                outline="#FFFF00", width=2, dash=(4, 4),
+                tags="draw_preview")
+
+    def _on_release(self, event):
+        cx, cy = event.x, event.y
+
+        if self._drag_action == "draw":
+            sx, sy = self._drag_start
+            if abs(cx - sx) > 5 and abs(cy - sy) > 5:
+                ix1, iy1 = self._canvas_to_img(min(sx, cx), min(sy, cy))
+                ix2, iy2 = self._canvas_to_img(max(sx, cx), max(sy, cy))
+                iw, ih = self._pil_img.size
+                ix1 = max(0, min(ix1, iw))
+                iy1 = max(0, min(iy1, ih))
+                ix2 = max(0, min(ix2, iw))
+                iy2 = max(0, min(iy2, ih))
+                ncx, ncy, nbw, nbh = self._pixel_to_yolo(ix1, iy1, ix2, iy2)
+                if nbw > 0.005 and nbh > 0.005:
+                    self.labels.append([0, ncx, ncy, nbw, nbh])
+                    self.selected = len(self.labels) - 1
+                    self._dirty = True
+
+            self._set_mode("select")
+            self._redraw()
+            self._update_ui()
+
+        self._drag_action = None
+
+    def _do_resize(self, cx, cy):
+        """Resize selected bbox based on which handle is dragged."""
+        orig = self._drag_orig
+        x1, y1, x2, y2 = self._yolo_to_pixel(orig[1], orig[2], orig[3], orig[4])
+
+        ix, iy = self._canvas_to_img(cx, cy)
+        iw, ih = self._pil_img.size
+        ix = max(0, min(ix, iw))
+        iy = max(0, min(iy, ih))
+
+        h = self._drag_handle
+        if h in (0, 3, 5): x1 = ix
+        if h in (2, 4, 7): x2 = ix
+        if h in (0, 1, 2): y1 = iy
+        if h in (5, 6, 7): y2 = iy
+
+        if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
+            nx1, ny1, nx2, ny2 = min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+            ncx, ncy, nbw, nbh = self._pixel_to_yolo(nx1, ny1, nx2, ny2)
+            self.labels[self.selected] = [orig[0], ncx, ncy, nbw, nbh]
+            self._dirty = True
+            self._redraw()
+
+    def _on_scroll(self, event):
+        """Mouse wheel zoom, centered on cursor position."""
+        ix, iy = self._canvas_to_img(event.x, event.y)
+
+        if event.delta > 0:
+            factor = 1.15
+        else:
+            factor = 1 / 1.15
+
+        new_zoom = self.zoom * factor
+        new_zoom = max(0.1, min(new_zoom, 10.0))
+        self.zoom = new_zoom
+
+        self.pan_x = event.x - ix * self.zoom
+        self.pan_y = event.y - iy * self.zoom
+
+        self._redraw()
+        self._update_ui()
+
+    def _on_pan_start(self, event):
+        self._pan_last = (event.x, event.y)
+
+    def _on_pan_move(self, event):
+        dx = event.x - self._pan_last[0]
+        dy = event.y - self._pan_last[1]
+        self.pan_x += dx
+        self.pan_y += dy
+        self._pan_last = (event.x, event.y)
+        self._redraw()
 
 
 def main():
