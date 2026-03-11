@@ -1,5 +1,467 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-03-10 (4) — Gemini 自動標註 + Label Editor 審核 + 多解析度裁切修復
+
+### 完成項目
+- [x] **Gemini 自動標註 5 個 2026 賽事** — mndu, cosp, okok, bcvi, tuis 各 250 張圖片用 gemini-3.1-flash-lite-preview 標註
+  - 最終統計：1,066 張有效標註（mndu:214, cosp:224, okok:215, bcvi:222, tuis:191）
+  - mndu 曾因 504 錯誤只有 58 張，刪除空檔後重跑修復到 214 張
+- [x] **Label Editor 審核功能** — Space 鍵標記已審核 + 斷點恢復（review_state.json）+ "✓ 已審核" 視覺標記 + 審核進度計數 + --images 參數指定圖片子目錄
+- [x] **人工審核進行中** — 兩台筆電分工審核
+  - 本機：cosp 完成, mndu 完成, okok 前半完成
+  - 另一台 (E:\scoring-analyzer-deploy)：okok 後半、bcvi、tuis
+- [x] **裁切工具多解析度修復** — tuis 事件中不同影片有不同解析度（qm1=640x360, qm2+=1280x720），crop 座標不相容
+  - 修復 crop_events.py：crop.json 記錄 base_w/base_h，自動等比縮放 crop 座標，統一 resize 輸出尺寸
+- [x] **auto_annotate.py 增強** — prompt 改為 0-6 bumpers + timeout 30s
+- [x] **config.py** — GEMINI_MODEL 改為 gemini-3.1-flash-lite-preview
+
+### 修改檔案
+- `label_editor.py` — 審核標記功能（review_state.json, Space 鍵, ✓ 已審核 overlay, --images 參數）
+- `crop_events.py` — 多解析度 crop 等比縮放修復（base_w/base_h, auto-scale, resize）
+- `config.py` — GEMINI_MODEL 改為 gemini-3.1-flash-lite-preview
+- `auto_annotate.py` — 增強 prompt（0-6 bumpers）、timeout 30s
+
+### 5-Question Reboot Check
+1. **做什麼？** 完成 2026 賽事 Gemini 自動標註 + 人工審核 + 裁切工具修復
+2. **進度？** 5 個賽事標註完成（1,066 張），3 個賽事審核完成（cosp, mndu, okok 前半），tuis 重新裁切中
+3. **下一步？** (1) tuis 重新裁切+提取+Gemini 標註 (2) 另一台筆電完成 okok 後半、bcvi、tuis 審核 (3) 合併所有資料集（2024mslr + 5×2026）(4) Colab T4 訓練 YOLO 模型
+4. **阻礙？** tuis 多解析度問題已修復但需重跑；另一台筆電審核進度待同步
+5. **檔案？** `label_editor.py`（審核功能）、`crop_events.py`（裁切修復）、`auto_annotate.py`（標註 pipeline）、`build_dataset.py`（合併用）
+
+---
+
+## Session: 2026-03-10 (3) — Engineering Notebook Update
+
+### 完成項目
+- [x] **中文 Analysis 分頁更新** — 透過 Chrome 瀏覽器自動化在 Google Doc 新增三個章節：
+  - 分離式背景遮罩（Temporal Median 背景模型分離式應用：球偵測用 masked frame、機器人偵測用原始 frame）
+  - YOLO Bumper 模型訓練流水線（Gemini 自動標註 → Label Editor 人工校正 → Colab 訓練 → ONNX 部署）
+  - 進球判定與射手歸因（區域進入判定 + 3層歸因 HP>Ownership>Proximity + 球所有權 + 出手偵測）
+- [x] **三處不一致修正** — 「第一版：YOLO 偵測」加註目前採用、「第二版：HSV Bumper」加註備用模式、更新「尚未解決的問題」區段
+- [x] **英文翻譯** — 完整工程筆記英文翻譯貼入 Google Doc「scouting → 英文」分頁
+- [x] **Label Editor 啟動** — 啟動 label_editor.py 供用戶截圖
+
+### 修改檔案
+- （無本地程式碼檔案修改，所有工作透過 Chrome 瀏覽器自動化操作 Google Doc）
+
+### 5-Question Reboot Check
+1. **做什麼？** 更新 Google Doc 工程筆記（中文 Analysis 新增章節 + 修正不一致 + 英文翻譯）
+2. **進度？** 工程筆記更新完成，中英文版本皆已同步
+3. **下一步？** (1) 測試更多影片確認 YOLO 偵測穩定性 (2) 測試完整 pipeline（進球判定+射手歸因） (3) 提交大量未 commit 的變更
+4. **阻礙？** 無
+5. **檔案？** Google Doc 工程筆記（線上文件，非本地檔案）
+
+---
+
+## Session: 2026-03-10 (2)
+
+### 完成項目
+- [x] **YOLO 偵測實測驗證** — 用 Qualification 1 影片測試 YOLOv26n 模型，F3 Debug 確認偵測正常
+- [x] **閾值調整** — `ROBOT_DETECTION_CONFIDENCE` 從 0.18 調整為 0.27（減少誤偵測）
+
+### 修改檔案
+- `config.py` — ROBOT_DETECTION_CONFIDENCE 0.18 → 0.27
+
+### 5-Question Reboot Check
+1. **做什麼？** YOLO 偵測實測驗證 + 閾值微調
+2. **進度？** 驗證完成，YOLO 偵測效果良好，閾值已調整
+3. **下一步？** (1) 測試更多影片確認穩定性 (2) 測試完整 pipeline（進球判定+射手歸因） (3) 提交大量未 commit 的變更
+4. **阻礙？** 無
+5. **檔案？** `config.py`（閾值）、`robot_detection.py`（YOLO 偵測器）、`app.py`（主介面）
+
+---
+
+## Session: 2026-03-10 00:10 (Endurance #5 — Colab Training + Model Deployment)
+
+### 完成項目
+- [x] **合併洪家豪標註** — 505 個 label 檔案從 `洪家豪/` 合併到 `datasets/2024mslr/labels_raw/`
+- [x] **build_dataset.py** — 新增可擴展的 CORRECTED_RANGES 系統，只用人工校正完的標註建構訓練集
+- [x] **YOLO 資料集建構** — 817 張圖片（train 654 + val 163），打包 yolo_dataset.zip (194.5 MB)
+- [x] **YOLOv11n 訓練完成（已棄用）** — 50 epochs, T4 GPU, mAP50=0.903（後改用 YOLOv26n）
+- [x] **改用 YOLOv26n 重新訓練** — 用戶原帳號 Colab GPU 額度用完，換帳號 + 共用 Drive 資料夾重新訓練
+- [x] **YOLOv26n 訓練完成** — 50 epochs, T4 GPU, ONNX 匯出 9.4 MB
+- [x] **模型備份** — best.pt + frc_robot.onnx (yolo26n) 皆已存入 Google Drive
+- [x] **模型部署到本地** — 下載 frc_robot.onnx (yolo26n, 9.4 MB) 到 `models/`，舊 yolo11n 備份為 `frc_robot_yolo11n.onnx`
+- [x] **切換偵測模式** — `config.py` ROBOT_DETECTION_MODE 從 `"GEMINI"` 改為 `"YOLO"`
+
+### 訓練歷程
+1. **YOLOv11n**（已棄用）— mAP50=0.903, P=0.891, R=0.862, ONNX 10.1 MB
+2. **YOLOv26n**（最終採用）— ONNX 9.4 MB，模型更小
+
+### 修改檔案
+- `build_dataset.py` — **新增** — YOLO 資料集建構腳本（CORRECTED_RANGES 可擴展）
+- `train_colab.ipynb` — **修改** — 模型從 yolo11n 改為 yolo26n
+- `config.py` — **修改** — ROBOT_DETECTION_MODE 從 `"GEMINI"` 改為 `"YOLO"`
+- `models/frc_robot.onnx` — **更新** — YOLOv26n ONNX 模型 (9.4 MB)
+- `models/frc_robot_yolo11n.onnx` — **新增** — YOLOv11n 備份 (10.1 MB)
+
+### 5-Question Reboot Check
+1. **做什麼？** YOLO bumper 偵測模型訓練 + 部署完成
+2. **進度？** YOLOv26n 模型已部署到 `models/frc_robot.onnx`，偵測模式已切換為 YOLO
+3. **下一步？** (1) 用實際比賽影片測試 YOLO 偵測效果 (2) 與 HSV Bumper 模式比較 (3) 調整 `ROBOT_DETECTION_CONFIDENCE` 閾值
+4. **阻礙？** 無。模型已就緒，待實際影片驗證
+5. **檔案？** `models/frc_robot.onnx`（YOLOv26n）、`config.py`（偵測模式+閾值）、`robot_detection.py`（YOLO 偵測器邏輯）
+
+---
+
+## Session: 2026-03-09 (Endurance #4)
+
+### 完成項目
+- [x] **Label Editor 互動標註工具** (`label_editor.py`) — 從設計到完整實作
+  - CustomTkinter + Canvas 暗色主題 GUI
+  - 圖片顯示 + YOLO bbox 渲染（Red/Blue 顏色區分）
+  - 滑鼠互動：選取、拖曳移動、8 handle resize、繪製新 bbox
+  - 鍵盤快捷鍵：方向鍵導航、Delete 刪除、Tab 切換類別、D 繪製、F 適應視窗、Ctrl+S 存檔、Ctrl+Z 復原
+  - 縮放（滾輪，游標為中心）+ 平移（右鍵拖曳）
+  - 自動存檔、undo stack、window resize 重算 zoom、bbox 移動 clamp
+- [x] **分工標註支援** — `--start`/`--end` 分割圖片範圍、`--labels` 自訂標註子目錄（預設 labels_raw）、顯示所有圖片（不只有標註的）
+- [x] **設計文件撰寫** — brainstorming skill 確認需求 → 設計文件 → 實作計劃
+- [x] **Subagent-Driven Development** — 3 個 Task 逐步實作 + code review + bugfix
+- [x] **兩人分工環境設定** — 專案複製到 E: 隨身碟、筆電 A/B 分工指南、`E:\scoring-analyzer\setup.txt` 環境安裝指南
+
+### 新增/修改檔案
+- `label_editor.py` — **新增** — 互動標註工具（CustomTkinter + Canvas，選取/移動/resize/繪製/zoom/pan/undo）
+- `docs/plans/2026-03-09-label-editor-design.md` — **新增** — Label Editor 設計文件
+- `docs/plans/2026-03-09-label-editor.md` — **新增** — Label Editor 實作計劃
+
+### Commits
+- `e22e5f8` feat: label editor scaffold — image display + bbox rendering
+- `b659779` feat: label editor — full interaction (select/move/resize/draw/zoom/pan)
+- `e5c294f` feat: label editor — undo, window resize, polish
+- `d5fe142` fix: label editor — canvas resize fit + bbox move clamping
+
+### 5-Question Reboot Check
+1. **做什麼？** Label Editor 已完成，接下來用它來人工校正 Gemini 自動標註的 2842 張 bumper bbox
+2. **進度？** Label Editor 完整實作完畢。Gemini 自動標註 2842 張全部完成（上一 session）。人工校正尚未開始
+3. **下一步？** (1) 兩人分工用 Label Editor 校正標註品質（筆電 A: `--end 1421`、筆電 B: `--start 1421`） (2) 校正完成後合併 labels (3) 重新匯出 YOLO 資料集 (4) 在 Colab T4 GPU 訓練 YOLO bumper 模型
+4. **阻礙？** 無。Label Editor 就緒，待人工校正
+5. **檔案？** `label_editor.py`（標註工具）、`datasets/2024mslr/labels_raw/`（待校正標註）、`datasets/2024mslr/images/`（2842 張圖片）
+
+---
+
+## Session: 2026-03-09 (Endurance #3)
+
+### 完成項目
+- [x] **Gemini 3.1 flash lite 速度測試** — 平均 3.1s/張，max 4.1s，timeout 從 60s 降至 10s
+- [x] **全量 Gemini 標註完成** — 2842 張全部標註完成（gemini-3.1-flash-lite-preview, bumper-only, ~3小時）
+- [x] **排除區域過濾** — 加入 `_EXCLUSION_ZONES` 過濾場地固定物件 FP（左右兩側 x≈0.14/0.874, y≈0.49），移除 784 個 FP boxes
+- [x] **labels_raw → labels 過濾** — 7023 raw boxes → 移除 784 FP + 33 小框 → 6206 有效 boxes（Red=3325, Blue=2881）
+- [x] **YOLO 資料集匯出** — 2635 張有效圖片 → train 2108 / val 527, data.yaml 就緒
+
+### 修改檔案
+- `auto_annotate.py` — timeout 60s→10s, 新增 `_EXCLUSION_ZONES` + `_in_exclusion_zone()` 過濾場地固定物件
+- `datasets/2024mslr/labels_raw/` — 2842 張 Gemini 原始標註
+- `datasets/2024mslr/labels/` — 2635 張過濾後 YOLO labels（6206 boxes）
+- `datasets/2024mslr/yolo_dataset/` — train/val split + data.yaml
+
+### 5-Question Reboot Check
+1. **做什麼？** Gemini 自動標註 + 過濾 + 匯出 YOLO bumper 訓練資料集
+2. **進度？** 全部完成。2842 張圖片標註完畢，過濾後 6206 boxes，資料集已匯出
+3. **下一步？** (1) 用 Label Editor 抽查標註品質 (2) 在 Colab T4 GPU 用 `datasets/2024mslr/yolo_dataset/data.yaml` 訓練 YOLO bumper 模型 (3) 訓練完替換 `models/frc_robot.onnx` 測試
+4. **阻礙？** 無。資料集已就緒
+5. **檔案？** `datasets/2024mslr/yolo_dataset/data.yaml`（訓練入口）、`train_robot_model.py`（訓練腳本）、`train_colab.ipynb`（Colab notebook）
+
+---
+
+## Session: 2026-03-09 (Endurance #2)
+
+### 完成項目
+- [x] **恢復耐久模式 Session 2** — 從 Session 1 接續，確認標註進度（1130/5182 labels）
+- [x] **auto_annotate.py 改為 native box_2d** — `_annotate_one` 從 structured JSON schema 改為 native `box_2d` 格式（unstructured response + regex parsing），確認 Gemini 座標格式 `[y_min, x_min, y_max, x_max]` 1000-based
+- [x] **_to_yolo 更新** — 處理 1000-based box_2d 座標轉換為 YOLO 格式
+- [x] **預設模型切換** — 從 `gemini-3.1-flash-lite-preview` → `gemini-2.5-flash` → 最終用戶要求改回 `gemini-3.1-flash-lite-preview`（速度優先）
+- [x] **API timeout 更新** — 從 20s 改為 60s
+- [x] **修正 labels 目錄** — auto_annotate.py 使用 `labels_raw/`，與之前 inline script 的 `labels/` 同步
+- [x] **刪除 gemini-2.5-flash 舊標註** — 清空所有 labels_raw/ 和 labels/ 內容
+- [x] **Prompt 改為只框 bumper** — 更新 `_ANNOTATE_PROMPT` 只框機器人下方保險桿（bumper），不框整台機器人。目標：bumper-only bbox 更精確，適合 HSV Bumper 偵測模式訓練
+- [x] **刪除 36 場廣角比賽幀** — qm13-17, 19, 22, 28, 30-31, 33-34, 38, 41, 43-44, 46, 51-53, 57, 62-65, 67, 70, 73-74, sf2m1, sf3m1, sf5m1, sf8m1, sf11m1, sf12m1, sf13m1（共 2340 張刪除），因為畫面有開廣角，不適合訓練
+- [x] **清空所有舊標註資料** — labels_raw/, labels/, yolo_dataset/ 全部清空，準備全新 bumper-only 標註
+
+### 修改檔案
+- `auto_annotate.py` — prompt 改為只框 bumper、`_annotate_one` 改為 native box_2d、`_to_yolo` 改為 1000-based 座標、預設模型改為 `gemini-3.1-flash-lite-preview`、timeout 改為 60s
+- `datasets/2024mslr/images/` — 刪除 36 場廣角比賽幀，從 5182 張減至 2842 張
+- `datasets/2024mslr/images_raw/` — 同上，從 5182 張減至 2842 張
+- `datasets/2024mslr/labels_raw/` — 清空（全部標註作廢，待重新 bumper-only 標註）
+- `datasets/2024mslr/labels/` — 清空
+- `datasets/2024mslr/yolo_dataset/` — 清空
+
+### 5-Question Reboot Check
+1. **做什麼？** 準備 bumper-only Gemini 自動標註 pipeline，清理資料集（移除廣角幀 + 清空舊標註）
+2. **進度？** Pipeline 已就緒（auto_annotate.py 更新完成），2842 張圖片待標註，標註尚未開始
+3. **下一步？** (1) 用 `gemini-3.1-flash-lite-preview` 跑 2842 張 bumper-only 全量標註 (2) 標註完成後匯出 YOLO 資料集 (3) 在 Colab T4 GPU 訓練 bumper YOLO 模型
+4. **阻礙？** 無。Pipeline 已就緒，等待下一 session 執行標註
+5. **檔案？** `auto_annotate.py`（標註 pipeline，bumper-only prompt）、`datasets/2024mslr/images/`（2842 張待標註圖片）、`datasets/2024mslr/crop.json`（裁切範圍）
+
+---
+
+## Session: 2026-03-09 (Endurance #1)
+
+### 完成項目
+- [x] **裁切範圍選取** — OpenCV `selectROI` 選取 2024 Magnolia Regional 裁切範圍 `(1, 105) 1278x534` → `datasets/2024mslr/crop.json`
+- [x] **Batch 1 裁切** — 548 張原始幀裁切完成
+- [x] **Gemini 模型測試** — 測試多個模型+格式組合：
+  - `gemini-3-flash-preview` + structured JSON: 504 DEADLINE_EXCEEDED（完全不可用）
+  - `gemini-2.5-flash` + structured JSON: 0 偵測
+  - `gemini-3.1-flash-lite-preview` + native box_2d: 快但偵測少（1-3/img）
+  - `gemini-2.5-flash` + native box_2d + 改良 prompt: **最佳方案**（3-6 偵測/img, ~20s/img）
+- [x] **座標格式研究** — 確認 Gemini native bounding box 為 `box_2d: [y_min, x_min, y_max, x_max]` 1000-based 座標（不是 pixel）。Structured JSON schema 會導致座標格式混亂，需用 unstructured response + regex 解析
+- [x] **下載全部比賽影片** — 87/89 部 2024 Magnolia Regional 影片（qm1-qm74 + sf1-sf13 + f1-f2，qm29/qm48 失敗）
+- [x] **全量提取+裁切** — 從 87 部影片提取 5182 張裁切幀（每 3 秒一幀，1278x534）
+- [x] **Batch 1 Gemini 標註完成** — 548 張 (qm1-qm10): 533 OK / 14 empty / 6 err，原始 2172 boxes，有效 YOLO labels 367 張 1470 boxes（小 bbox 被過濾）
+- [x] **匯出 YOLO 資料集 v1** — `datasets/2024mslr/yolo_dataset/`: 294 train + 73 val, data.yaml
+- [ ] **Batch 2 Gemini 標註進行中** — 550/4634 完成 (qm11-qm74+sf+f), 預計 ~24 小時（背景執行中 Task b0tfcnqn6）
+- [x] **YOLO 資料集更新匯出** — 665 imgs (532 train / 133 val), 3085 boxes (R=1426 B=1659)
+
+### 新增/修改檔案
+- `auto_annotate.py` — 加入 `HttpOptions(timeout=)` 參數
+- `datasets/2024mslr/crop.json` — **新增** — 裁切範圍 `(1, 105) 1278x534`
+- `datasets/2024mslr/images/` — **新增** — 5182 張裁切後圖片
+- `datasets/2024mslr/images_raw/` — **更新** — 5182 張原始圖片
+- `datasets/2024mslr/labels/` — **新增** — YOLO labels（batch 1 完成，batch 2 進行中）
+- `datasets/2024mslr/videos/` — **更新** — 87 部 720p mp4
+- `datasets/2024mslr/yolo_dataset/` — **新增** — YOLO train/val split + data.yaml
+
+### 5-Question Reboot Check
+1. **做什麼？** Gemini 自動標註 FRC 機器人 → 匯出 YOLO 訓練資料集
+2. **進度？** 1109/5182 已標註。YOLO 資料集已匯出：665 imgs / 3085 boxes (R=1426 B=1659)。Batch 2 在背景持續標註中（550/4634）
+3. **下一步？** (1) **可以立即開始訓練** — 資料集已匯出在 `datasets/2024mslr/yolo_dataset/data.yaml` (2) Batch 2 背景繼續跑，完成後重新匯出可獲得更多資料 (3) 訓練完替換 `models/frc_robot.onnx` 測試
+4. **阻礙？** Batch 2 背景進程需確認是否仍在跑（可能 session 結束後停止）。若停了，重新跑相同腳本即可（自動跳過已完成的 labels）。bbox 有 ~35% 圖片為空（false negative + API error）
+5. **檔案？** `auto_annotate.py`（標註 pipeline）、`datasets/2024mslr/`（完整資料）、`datasets/2024mslr/yolo_dataset/data.yaml`（訓練入口）、`train_robot_model.py`（訓練腳本）
+
+---
+
+## Session: 2026-03-08
+
+### 完成項目
+- [x] **下載 2024 Magnolia Regional 比賽影片** — 用 `download_matches.py` 查詢 TBA API，找到 89 場比賽有影片，背景下載中（每 3 秒提取一幀，fps=0.333）
+- [x] **互動式裁切範圍選取** — OpenCV `selectROI` 畫框選取主場地區域，排除底部計分板和小視窗，存到 `datasets/2023mslr/crop.json`: `(147, 179) 1019x274`
+- [x] **Gemini API 標註測試** — 測試多個模型：`gemini-3-flash-preview` API 504 超時、`gemini-2.5-flash` 偵測品質極差、`gemini-2.0-flash` 已停用 (404)
+- [x] **Google AI Studio 瀏覽器自動化標註** — Playwright 操作 AI Studio 網頁版，`gemini-3-flash-preview` Thinking High 模式偵測正確（6 個偵測全對，3 Blue + 3 Red），但速度慢（~3 分鐘/張）
+- [x] **Gemini 座標格式研究** — 確認 Gemini 使用 1000-based 座標格式，轉換公式：`pixel_x = coord / 1000 * width`
+- [x] **2024 影片清單改為官方影片** — 從 YouTube 播放清單 `PLXMtScTweiUEnho5azcuN_LmKOEk4690v` 下載官方比賽影片（而非 TBA 第一個影片連結），確保影片品質穩定
+- [x] **下載 10 部 2024 Magnolia Regional 官方比賽影片** — 720p mp4，存放於 `datasets/2024mslr/videos/`（001-010）
+- [x] **提取 550 幀** — 每 3 秒一幀（fps=0.333），從 10 部影片提取，存放於 `datasets/2024mslr/images_raw/`（v01-v10 前綴）
+
+### 新增/修改檔案
+- `auto_annotate.py` — Gemini 自動標註 pipeline（修改 prompt 和 API 呼叫）
+- `download_matches.py` — TBA + YouTube 下載工具（修改下載邏輯）
+- `datasets/2023mslr/crop.json` — **新增** — 裁切範圍設定
+- `datasets/2023mslr/images_cropped/test1.jpg` — **新增** — 裁切測試圖片
+- `datasets/2023mslr/preview/` — **新增** — 各種標註測試預覽圖
+- `datasets/2024mslr/videos/` — **新增** — 10 部 2024 官方比賽影片（720p mp4, 001-010）
+- `datasets/2024mslr/images_raw/` — **新增** — 550 幀提取圖片（v01-v10 前綴）
+- `datasets/2024mslr/match_videos.json` — **更新** — 改為選擇第二個（官方）影片連結
+
+### 5-Question Reboot Check
+1. **做什麼？** 用 Gemini 自動標註 FRC 機器人 → 訓練 YOLO 模型
+2. **進度？** 2024 影片下載+提取完成（10 部影片, 550 幀），標註方案已驗證（AI Studio gemini-3-flash-preview 品質 OK），但批次標註尚未開始
+3. **下一步？** (1) 讓用戶選取 2024 裁切範圍 (2) 批次裁切 550 幀 (3) 找可靠的批次 Gemini 標註方式 (4) YOLO 訓練
+4. **阻礙？** Gemini API 504 超時問題未解，AI Studio 瀏覽器太慢（3min/張），需找批次標註方案
+5. **檔案？** `auto_annotate.py`（標註 pipeline）、`download_matches.py`（影片下載）、`datasets/2024mslr/`（2024 影片+幀）、`datasets/2023mslr/crop.json`（裁切設定）
+
+---
+
+## Session: 2026-03-06 (下午)
+
+### 完成項目
+- [x] **下載比賽影片** — 從 YouTube 下載 FRC 比賽影片 `match_video.mp4`（1920x1080, 60fps, 214s, ~95MB），升級 yt-dlp 2025.12.8 → 2026.3.3
+- [x] **切回 YOLO 機器人偵測** — `config.py` `ROBOT_DETECTION_MODE` 從 `"HSV"` 改回 `"YOLO"`，使用既有 `models/frc_robot.onnx` YOLO 模型
+
+### 修改檔案
+- `config.py` — `ROBOT_DETECTION_MODE` 從 `"HSV"` 改為 `"YOLO"`
+- `match_video.mp4` — **新增** — YouTube 下載的 FRC 比賽影片（1920x1080, 60fps）
+
+### 5-Question Reboot Check
+1. **做什麼？** 下載新的 FRC 比賽影片 + 切回 YOLO 機器人偵測模式準備測試
+2. **進度？** 影片已下載，YOLO 模式已啟用，尚未跑分析測試
+3. **下一步？** 用 `python main.py match_video.mp4` 跑 YOLO 模式分析測試 → 驗證機器人偵測效果 → 影片是三視角可能需要 ROI 裁切 → 處理 HP 進球計算不準確 + 藍方 HP 進球分析不到的問題
+4. **阻礙？** 影片可能是三視角合成畫面，需確認是否需要 ROI 裁切只分析其中一個視角；YOLO 模型是用舊資料集訓練的，對這個新影片的偵測效果未知
+5. **檔案？** `config.py`（ROBOT_DETECTION_MODE=YOLO）、`app.py`（分析流程）、`robot_detection.py`（YOLO 偵測器）、`match_video.mp4`（測試影片）
+
+---
+
+## Session: 2026-03-06 (上午)
+
+### 完成項目
+- [x] **FRC 工程筆記撰寫與迭代** — 為 FRC 評審提交撰寫完整工程筆記，經過多輪迭代：
+  1. **研究 FRC 工程筆記寫法** — 調查 FRC 獎項評分標準、Technical Binder 結構、反 AI 味寫作技巧
+  2. **生成 ENGINEERING_NOTEBOOK.md** — 完整 Markdown 版工程筆記（學生口語風格、具體數據、失敗經驗）
+  3. **轉換 ENGINEERING_NOTEBOOK.html** — 精簡版 HTML（為 Google Docs 匯入，帶 CSS 樣式，無程式碼區塊）
+  4. **產生 ENGINEERING_NOTEBOOK.txt** — 繁體中文純文字版（用戶反饋不需排版）
+  5. **翻譯 ENGINEERING_NOTEBOOK_EN.txt** — 英文純文字版
+  6. **插入圖片標記** — 在兩份 txt 中加入 `[圖片：...]` / `[Image: ...]` 標記
+- [x] **用戶自行編輯精簡** — 用戶修改了中文版：精簡內容、調整 YOLO vs HSV 主次關係（HSV Bumper 為主、YOLO 為備選）、刪除部分章節
+- [x] **發現並修正內容矛盾** — YOLO vs HSV Bumper 在文中誰是主要方案的描述矛盾，已修正統一
+- [x] **英文版同步** — 根據用戶修改後的中文版重新翻譯英文版，確保兩版一致
+
+### 新增/修改檔案
+- `ENGINEERING_NOTEBOOK.md` — 完整中文工程筆記（Markdown 格式）
+- `ENGINEERING_NOTEBOOK.html` — 精簡版 HTML（帶 CSS 樣式、flow box、彩色提示框）
+- `ENGINEERING_NOTEBOOK.txt` — 繁體中文純文字版（用戶已自行編輯精簡）
+- `ENGINEERING_NOTEBOOK_EN.txt` — 英文純文字版（最終同步用戶修改）
+
+### 5-Question Reboot Check
+1. **做什麼？** 為 FRC 評審撰寫工程筆記（Engineering Notebook），記錄專案技術開發歷程
+2. **進度？** 工程筆記全部完成（md/html/txt 中文版 + txt 英文版），用戶已自行編輯精簡中文版，英文版已同步
+3. **下一步？** (1) 用戶截取應用截圖插入工程筆記 (2) 上傳 Google Docs 或列印提交 (3) 回到主線開發：**用戶需跑測試驗證 Fix 3-5 效果**（機器人追蹤修復，上次 session 2026-03-02 的 5 個 fix 中 Fix 3-5 尚未經用戶實際影片測試）(4) 若追蹤恢復，處理 HP 進球計算不準確 + 藍方 HP 進球分析不到
+4. **阻礙？** 機器人追蹤 Fix 3-5 尚未經用戶實際影片驗證（2026-03-02 session 遺留）；工程筆記截圖需用戶自行截取
+5. **檔案？** `ENGINEERING_NOTEBOOK.txt`（主要中文版，用戶已編輯）、`ENGINEERING_NOTEBOOK_EN.txt`（英文版，已同步）、`ENGINEERING_NOTEBOOK.md`（完整 Markdown 版）、`ENGINEERING_NOTEBOOK.html`（精簡 HTML 版）
+
+---
+
+## Session: 2026-03-02
+
+### 完成項目
+- [x] **機器人追蹤失效根因分析** — 深度診斷找到 3 個 P0 致命問題：
+  1. **背景遮罩過度過濾**（最致命）：`app.py` 用 `cv2.bitwise_and(frame, mask=fg_mask)` 遮蔽背景，但 Temporal Median 將靜止/慢移機器人納入背景 → bumper 像素被抹黑 → HSV 零偵測
+  2. **BG_FG_THRESHOLD=30 太敏感**：靜止機器人 absdiff ≈ 15-20，低於閾值被判為背景
+  3. **Temporal Median 在 FRC 場景不適用**：背景假設「機器人不在場」但 FRC 比賽機器人始終在場
+- [x] **外部研究** — 調研替代方案：YCrCb 色彩空間、YOLO-World 零樣本偵測、YOLOE 圖像提示偵測、SportSORT 運動追蹤、Roboflow 社群最佳實踐
+- [x] **Fix 1: 分離背景遮罩** — `app.py` 修改分析流程：球偵測用 `frame_masked`（保留背景過濾），機器人偵測用原始 `frame`（不受背景模型影響）
+- [x] **Fix 2: HSV 偵測診斷日誌** — `robot_detection.py` 加入逐步診斷：HSV mask 像素數、輪廓數、面積/長寬比過濾統計、NMS 前後數量
+- [x] **Fix 3: 放寬 Bumper 長寬比** — `config.py` `BUMPER_MIN_ASPECT` 從 1.2 降到 0.5（允許直立/接近方形的 bumper 通過過濾）
+- [x] **Fix 4: MOT 永遠用距離匹配** — `app.py` 移除 ByteTrack 條件分支，MOT 模式一律使用 `_match_direct()` 距離匹配
+- [x] **Fix 5: 距離式標記匹配** — `robot_tracker.py` 新增 `_consume_pending_marker()` 方法，用距離比對將 pending marker 分配給最近的 tracker
+
+### 診斷結果（用戶測試）
+- 背景遮罩修復成功 — 黑色像素佔比 0%（機器人不再被抹黑）
+- HSV 偵測有結果 — 每幀 1-3 個紅色偵測通過所有過濾
+- 但 MOT 追蹤輸出仍為 0 → 發現是 ByteTrack 路徑 + 長寬比過濾的組合問題
+- 第二輪修復（Fix 3-5）已完成，**用戶尚未跑測試**
+
+### 修改檔案
+- `app.py` — 分離背景遮罩（球偵測用 frame_masked，機器人用原始 frame）+ MOT 永遠用 `_match_direct()` 距離匹配
+- `robot_detection.py` — 加入詳細 HSV 偵測診斷日誌（mask pixels、contour count、filter stats）
+- `robot_tracker.py` — 新增 `_consume_pending_marker()` 距離式標記匹配方法
+- `config.py` — `BUMPER_MIN_ASPECT` 1.2 → 0.5
+- `FINDINGS.md` — 新增根因分析（3 個 P0 問題）+ 替代方案研究（YCrCb、YOLO-World、YOLOE、SportSORT）
+
+### 用戶提到的其他問題（未處理）
+- HP 進球計算不準確
+- 藍方 HP 進球分析不到
+- 進球偵測算蠻準確的不用改
+
+### 5-Question Reboot Check
+1. **做什麼？** 排查並修復機器人追蹤失效（HSV Bumper 模式追蹤不到任何機器人）
+2. **進度？** 根因已確認（背景遮罩+長寬比+ByteTrack 路徑）。5 個修復已實作，第一輪 Fix 1-2 驗證通過（HSV 偵測恢復），第二輪 Fix 3-5 待用戶跑測試
+3. **下一步？** **用戶需跑測試驗證 Fix 3-5 效果**（`python main.py` → 載入影片 → 分析 25 秒 → 檢查機器人追蹤是否有輸出）。若追蹤恢復，接著處理 HP 進球計算不準確 + 藍方 HP 進球分析不到的問題。**記得截圖**（工程筆記用）
+4. **阻礙？** Fix 3-5 尚未經用戶實際影片驗證，無法確認追蹤是否完全恢復
+5. **檔案？** `app.py`（背景遮罩分離 + MOT 距離匹配）、`robot_detection.py`（HSV 診斷日誌）、`robot_tracker.py`（`_consume_pending_marker()`）、`config.py`（`BUMPER_MIN_ASPECT`=0.5）
+
+---
+
+## Session: 2026-03-01
+
+### 完成項目
+- [x] **FRC 工程筆記研究** — 深度研究 FRC Engineering Notebook 撰寫 best practices、Judges Award / Engineering Inspiration Award 評分標準、anti-AI 寫作風格（學生口語、具體數據、失敗經驗）
+- [x] **技術架構深度分析** — 分析專案所有模組（config, detection, tracking, robot_detection, robot_tracker, scoring, background, calibration, app 等），為工程筆記提取技術細節和設計決策
+- [x] **ENGINEERING_NOTEBOOK.md** — 生成完整中文工程筆記（學生口語風格，包含問題發現、失敗嘗試、技術決策理由、數據驗證）
+- [x] **ENGINEERING_NOTEBOOK.html** — 帶 CSS 樣式的 HTML 版本（用於 Google Docs 匯入）
+- [x] **Google Docs 匯入問題** — 用戶反映 Google Docs 不支援直接上傳 HTML，提供替代方案（瀏覽器開啟後複製貼上）
+- [x] **HTML 精簡重寫** — 用戶反映內容太長且有程式碼格式，重寫精簡版（砍 50%、移除所有 code blocks、改用 flow box + 彩色提示框）
+- [x] **ENGINEERING_NOTEBOOK.txt** — 用戶要求不要排版，生成純文字版本
+- [x] **ENGINEERING_NOTEBOOK_EN.txt** — 英文翻譯版本（保持學生口語風格）
+- [x] **截圖建議** — 用戶提供一張分析結果截圖，建議了 9 張圖的優先順序清單（分析結果總覽、4-Panel Debug、Bumper 取色、HSV 校正、設定面板、播放 overlay、背景模型、程式碼架構、Colab 訓練）
+
+### 新增檔案
+- `ENGINEERING_NOTEBOOK.md` — 完整中文工程筆記（Markdown 格式）
+- `ENGINEERING_NOTEBOOK.html` — 精簡版 HTML（帶 CSS 樣式，flow box + 彩色提示框）
+- `ENGINEERING_NOTEBOOK.txt` — 純文字版中文工程筆記
+- `ENGINEERING_NOTEBOOK_EN.txt` — 英文翻譯版工程筆記
+
+### 5-Question Reboot Check
+1. **做什麼？** 撰寫 FRC 工程筆記（Engineering Notebook），記錄專案的技術開發歷程，用於 FRC 評審提交
+2. **進度？** 中文版和英文版均已完成（md/html/txt 三種格式）。截圖建議清單已提供，用戶需自行截取應用畫面
+3. **下一步？** (1) 用戶截取建議的 9 張應用截圖 (2) 將截圖插入工程筆記 (3) 上傳到 Google Docs 或列印 (4) 回到主線開發：排查機器人追蹤失效根因（HSV Bumper 模式追蹤不到任何機器人）
+4. **阻礙？** 機器人追蹤仍完全失效（上次 session 發現的問題尚未修復），待排查根因
+5. **檔案？** `ENGINEERING_NOTEBOOK.md`（主要中文版）、`ENGINEERING_NOTEBOOK_EN.txt`（英文版）、`ENGINEERING_NOTEBOOK.html`（精簡 HTML 版）、`ENGINEERING_NOTEBOOK.txt`（純文字版）
+
+---
+
+## Session: 2026-02-28 (3)
+
+### 完成項目
+- [x] **分析按鈕拆分** — 原單一「開始分析」按鈕拆為「分析 25 秒」+「完整分析」兩個按鈕
+  - `self.analyze_btn` → `self.analyze_quick_btn`（綠色 accent，分析前 25×fps 幀）+ `self.analyze_full_btn`（紫色 #8e44ad，分析全部幀）
+  - `_on_analyze(max_seconds=None)` 新增 `max_seconds` 參數化，計算 `_analysis_max_frames`
+  - `_run_analysis()` 中 `min(total_frames, max_frames)` 限制處理範圍
+- [x] **播放卡頓修復** — 分析完播放影片會播一下卡一下
+  - 根因：牆鐘時間同步 + overlay 渲染重 → 落後時跳大步追趕 → 視覺卡頓
+  - 第一次修復：加入落後>10幀重設基準 + 最小delay 1ms→10ms（仍有間歇卡頓）
+  - 第二次修復：**完全移除牆鐘同步**，改為固定步進（每 tick 前進 `fps/30 × speed` 幀）。渲染慢就自動降速，不卡頓
+  - 移除了 `_play_wall_start` 和 `_play_start_frame` 在 `_play_loop` 中的使用（`_toggle_play` 和 `_toggle_speed` 中仍保留初始化但不再被播放迴圈讀取）
+
+### 修改檔案
+- `app.py` — 分析按鈕拆分（`analyze_quick_btn` + `analyze_full_btn`）、`_on_analyze(max_seconds)` 參數化、`_run_analysis()` 幀數限制、播放迴圈從牆鐘同步改為固定步進
+
+### 測試結果
+用戶實際影片驗證：
+- 球偵測：**準確** ✅
+- 機器人追蹤：**完全丟失追蹤不到** ❌
+- 射手歸因：**追蹤不到**（因機器人追蹤失敗）❌
+
+### 5-Question Reboot Check
+1. **做什麼？** 拆分分析按鈕（25 秒快速 + 完整分析）+ 修復播放卡頓（牆鐘同步改固定步進）
+2. **進度？** 兩項功能修改完成。球偵測正常，但機器人追蹤完全失效需排查
+3. **下一步？** 排查機器人追蹤失敗根因 — 可能是：(1) HSV Bumper 偵測器參數問題 (2) Bumper 取色模板未正確傳遞 (3) 背景模型前景遮罩過度過濾 (4) 分析幀數限制影響追蹤初始化
+4. **阻礙？** 機器人追蹤完全失效，射手歸因連帶無法工作，需優先排查
+5. **檔案？** `app.py`（分析按鈕 `analyze_quick_btn`/`analyze_full_btn`、`_on_analyze()`、`_run_analysis()`、`_play_loop()`）、`robot_detection.py`（HSV Bumper 偵測器）、`robot_tracker.py`（MOT 追蹤）
+
+---
+
+## Session: 2026-02-28 (2)
+
+### 完成項目
+- [x] **分析按鈕拆分為「分析 25 秒」+「完整分析」** — 原單一「開始分析」按鈕拆為兩個，方便快速預覽和完整分析切換
+  - `self.analyze_btn` 拆為 `self.analyze_quick_btn`（綠色 accent，分析前 25×fps 幀）+ `self.analyze_full_btn`（紫色 #8e44ad，分析全部幀）
+  - `_on_analyze(max_seconds=None)` 新增 `max_seconds` 參數，計算 `_analysis_max_frames`
+  - `_run_analysis()` 中 `total = min(self.total_frames, self._analysis_max_frames)` 限制處理幀數
+  - `_analysis_error()` 和 `_finish_analysis()` 同時恢復兩個按鈕狀態
+  - 語法驗證通過
+
+### 修改檔案
+- `app.py` — 分析按鈕拆分（`analyze_quick_btn` + `analyze_full_btn`）、`_on_analyze(max_seconds)` 參數化、`_run_analysis()` 幀數限制、錯誤/完成回調恢復雙按鈕
+
+### 5-Question Reboot Check
+1. **做什麼？** 將單一分析按鈕拆為「分析 25 秒」（快速預覽）和「完整分析」（全部幀）兩個按鈕
+2. **進度？** 100% 完成，語法驗證通過
+3. **下一步？** 用實際影片驗證：(1) 25 秒分析是否正確在 25×fps 幀停止 (2) 完整分析是否照常處理全部幀 (3) 分析中/錯誤/完成時兩個按鈕狀態是否正確切換
+4. **阻礙？** 無明確阻礙
+5. **檔案？** `app.py`（`analyze_quick_btn`、`analyze_full_btn`、`_on_analyze()`、`_run_analysis()`、`_analysis_error()`、`_finish_analysis()`）
+
+---
+
+## Session: 2026-02-28
+
+### 完成項目
+- [x] **Bumper 取色偵測完整實作** — 按照 `docs/plans/2026-02-27-bumper-color-pick-design.md` 計劃執行 6 個 Task，完成從設計到驗證的全流程
+  - **calibration.py** — 新增 `build_bumper_template()` 函式，從用戶取色點建立 HSV H+S 16x16 直方圖模板 + 自動判斷聯盟（red/blue）
+  - **config.py + runtime_config.py** — 新增 `BUMPER_TEMPLATE_SIMILARITY=0.3` 常數和 dataclass 欄位
+  - **robot_detection.py** — `BumperDetectorHSV` 新增 `set_templates()`, `_match_template()` 方法，`detect()` 中加入模板過濾邏輯（有模板時只保留匹配的候選）
+  - **app.py** — 完整 UI 改造：按鈕從「標記機器人」改為「Bumper 取色」；新增 `_start_bumper_pick` / `_finish_bumper_pick` 互動方法；canvas 支援 `bumper_pick` 模式（左鍵取色點、右鍵完成）；繪製取色中的橙色圓點；模板傳遞到偵測器（`set_templates()`）；auto mode 邏輯調整（有取色模板時不自動偵測）；`_cancel_interaction` 支援 bumper_pick 清理
+  - **app.py 輔助方法** — 新增 `_get_current_frame()` 輔助方法；重構 `_get_current_frame_for_preview()` 為呼叫 `_get_current_frame()`；`_finish_crop` / `_reset_crop` / `_clear_all_marks` 清除 bumper 模板
+  - **驗證** — 5 個檔案語法檢查通過、import 測試通過、端到端功能驗證通過
+
+### 修改檔案
+- `calibration.py` — 新增 `build_bumper_template()` 函式（HSV H+S 16x16 直方圖模板建立 + 聯盟自動判斷）
+- `config.py` — 新增 `BUMPER_TEMPLATE_SIMILARITY = 0.3` 常數
+- `runtime_config.py` — 新增 `bumper_template_similarity` dataclass 欄位
+- `robot_detection.py` — `BumperDetectorHSV` 新增 `set_templates()`, `_match_template()`, `detect()` 模板過濾邏輯
+- `app.py` — Bumper 取色 UI 取代框選標記、`_get_current_frame()` 輔助方法、`bumper_pick` canvas 互動模式、模板傳遞、auto mode 調整、清理邏輯
+
+### Git Commit
+- `8cd6d2d` — `feat: Bumper 取色偵測 + 背景模型 + HSV Bumper + MOT 增強`（19 files, +4376/-222）
+- 包含多個 session 累積的未提交變更（背景模型、HSV Bumper 偵測器、MOT 增強等）
+
+### 5-Question Reboot Check
+1. **做什麼？** 按照設計計劃實作 Bumper 取色偵測功能，用戶在影片上點擊機器人 bumper 取色 → 建立 HSV 直方圖模板 → 偵測時只追蹤匹配模板的機器人
+2. **進度？** 100% 完成。6 個 Task 全部完成，語法檢查 + import 測試 + 端到端驗證通過
+3. **下一步？** 用實際 FRC 比賽影片驗證 Bumper 取色偵測效果：(1) 取色流程是否直覺易用 (2) 模板匹配閾值 0.3 是否合適 (3) 是否有效過濾非目標機器人 (4) 與背景模型前景遮罩搭配的偵測精度
+4. **阻礙？** 無明確阻礙；`BUMPER_TEMPLATE_SIMILARITY=0.3` 閾值可能需要根據實際影片微調
+5. **檔案？** `calibration.py`（`build_bumper_template()`）、`robot_detection.py`（`BumperDetectorHSV` 模板匹配）、`app.py`（Bumper 取色 UI + `_get_current_frame()`）、`config.py`（`BUMPER_TEMPLATE_SIMILARITY`）
+
+---
+
 ## Session: 2026-02-27
 
 ### 完成項目
@@ -530,4 +992,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-02-27*
+*Last updated: 2026-03-06*

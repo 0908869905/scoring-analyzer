@@ -12,3 +12,7 @@ onnxruntime>=1.17.0
 #   pip install onnxruntime-gpu>=1.17.0
 # DirectML 版（AMD/Intel GPU，Windows）:
 #   pip install onnxruntime-directml>=1.17.0
+
+# ── Gemini API（選配，GEMINI 偵測模式需要）─────────────
+# pip install google-genai>=1.0.0
+# 設定環境變數: GEMINI_API_KEY=your_key

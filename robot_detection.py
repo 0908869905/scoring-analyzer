@@ -1,9 +1,10 @@
 """
 FRC Scoring Analyzer — 機器人偵測
 
-支援兩種偵測模式:
+支援三種偵測模式:
 1. HSV Bumper 偵測（預設）: 用色彩過濾偵測紅藍 bumper，不需訓練資料
 2. YOLO ONNX 偵測（備選）: 需要 frc_robot.onnx 模型檔
+3. Gemini API 偵測（零樣本）: 用 Gemini Vision 語義偵測，不需訓練資料
 
 ONNX 支援兩種輸出格式:
 - 傳統 YOLO: [1, 4+num_classes, num_proposals] — 需手動 NMS
@@ -476,16 +477,37 @@ class BumperDetectorHSV:
             mask2 = cv2.inRange(hsv, mask_low_2, mask_high_2)
             mask = cv2.bitwise_or(mask, mask2)
 
+        # ── 診斷：HSV 遮罩像素統計 ──
+        if self._diag_count < 3:
+            color_name = "Red" if class_id == 0 else "Blue"
+            mask_pixels = int(cv2.countNonZero(mask))
+            total_pixels = mask.shape[0] * mask.shape[1]
+            print(f"[DIAG] {color_name} HSV mask: "
+                  f"{mask_pixels}/{total_pixels} pixels "
+                  f"({mask_pixels/total_pixels*100:.3f}%)")
+
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel_close)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel_open)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
 
+        # ── 診斷：輪廓過濾統計 ──
+        n_total = len(contours)
+        n_area_fail = 0
+        n_aspect_fail = 0
+
         results = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < self._min_area or area > self._max_area:
+                n_area_fail += 1
+                # 診斷：印出被過濾的面積
+                if self._diag_count < 3 and area > 50:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    print(f"[DIAG]   面積過濾: area={area:.0f} "
+                          f"(要求 {self._min_area}-{self._max_area}) "
+                          f"bbox={w}x{h} @ ({x},{y})")
                 continue
 
             x, y, w, h = cv2.boundingRect(cnt)
@@ -494,6 +516,11 @@ class BumperDetectorHSV:
 
             aspect = w / h
             if aspect < self._min_aspect or aspect > self._max_aspect:
+                n_aspect_fail += 1
+                if self._diag_count < 3:
+                    print(f"[DIAG]   長寬比過濾: aspect={aspect:.2f} "
+                          f"(要求 {self._min_aspect}-{self._max_aspect}) "
+                          f"bbox={w}x{h} area={area:.0f}")
                 continue
 
             # conf 用面積佔比模擬（越大的 bumper 越確定）
@@ -505,6 +532,12 @@ class BumperDetectorHSV:
                 float(x + w), float(y + h),
                 float(conf), class_id,
             ))
+
+        if self._diag_count < 3:
+            color_name = "Red" if class_id == 0 else "Blue"
+            print(f"[DIAG] {color_name} 輪廓: "
+                  f"total={n_total} → area_fail={n_area_fail} "
+                  f"aspect_fail={n_aspect_fail} → pass={len(results)}")
 
         return results
 
@@ -523,6 +556,17 @@ class BumperDetectorHSV:
             class_id: 0=Red, 1=Blue
         """
         conf_thresh = confidence if confidence is not None else 0.3
+
+        # ── 診斷：輸入 frame 統計 ──
+        if self._diag_count < 3:
+            h, w = frame.shape[:2]
+            black_pixels = int(np.sum(np.all(frame == 0, axis=2)))
+            total_pixels = h * w
+            mean_bgr = frame.mean(axis=(0, 1))
+            print(f"[DIAG] detect() 輸入: {w}x{h}, "
+                  f"黑色像素={black_pixels}/{total_pixels} "
+                  f"({black_pixels/total_pixels*100:.1f}%), "
+                  f"平均BGR=({mean_bgr[0]:.0f},{mean_bgr[1]:.0f},{mean_bgr[2]:.0f})")
 
         blurred = cv2.GaussianBlur(frame, (5, 5), 0)
         hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
@@ -587,6 +631,250 @@ class BumperDetectorHSV:
                      tile_size: int = 1280,
                      overlap: float = 0.15) -> list[tuple]:
         """HSV 在全解析度上跑，detect() 已涵蓋 — tiled 回空避免重複偵測。"""
+        return []
+
+    def get_class_name(self, class_id: int) -> str:
+        if 0 <= class_id < len(self.class_names):
+            return self.class_names[class_id]
+        return f"class_{class_id}"
+
+    def is_robot_class(self, class_id: int) -> bool:
+        return 0 <= class_id < len(self.class_names)
+
+    def infer_alliance(self, class_id: int) -> str:
+        if class_id == 0:
+            return "red"
+        if class_id == 1:
+            return "blue"
+        return ""
+
+
+# ═══════════════════════════════════════════════════════
+# Gemini API 偵測（零樣本語義偵測）
+# ═══════════════════════════════════════════════════════
+
+_GEMINI_PROMPT = """\
+You are an FRC (FIRST Robotics Competition) robot detection expert.
+Analyze this FRC match frame and locate ALL visible FRC robots.
+
+Rules:
+- FRC robots have red or blue bumpers (pool noodle covered in fabric) \
+around their chassis
+- There are at most 6 robots on the field (3 red + 3 blue), but some \
+may be fully occluded
+- Only report robots you can actually see — do NOT guess occluded ones
+- The bumper color determines the alliance: red bumper = red alliance, \
+blue bumper = blue alliance
+- Field elements (trench, hub, scoring stations) are NOT robots — \
+ignore them even if they have red/blue coloring
+- Report bounding boxes as pixel coordinates [x_left, y_top, x_right, y_bottom]
+
+Image dimensions: {width} x {height} pixels
+"""
+
+
+class RobotDetectorGemini:
+    """Gemini API 機器人偵測器 — 零樣本語義偵測，與 RobotDetectorONNX 同介面。
+
+    使用 Gemini Vision 分析每幀畫面，找出所有可見的 FRC 機器人。
+    不需要任何訓練資料，跨年份/場地/角度通用。
+    """
+
+    class_names = ("Red", "Blue")
+
+    def __init__(self, model: str | None = None,
+                 strategy: str | None = None,
+                 detect_interval: int | None = None,
+                 max_image_size: int | None = None):
+        from config import (GEMINI_MODEL, GEMINI_DETECT_STRATEGY,
+                            GEMINI_DETECT_INTERVAL, GEMINI_MAX_IMAGE_SIZE)
+
+        self._model_name = model or GEMINI_MODEL
+        self._strategy = strategy or GEMINI_DETECT_STRATEGY
+        self._detect_interval = detect_interval or GEMINI_DETECT_INTERVAL
+        self._max_image_size = max_image_size or GEMINI_MAX_IMAGE_SIZE
+        self._call_count = 0       # detect() 被呼叫的總次數
+        self._api_call_count = 0   # 實際送 API 的次數
+        self._client = None
+        self._init_client()
+
+        # adaptive 模式狀態
+        self._adaptive_dense_calls = 30   # 前 N 次呼叫密集偵測
+        self._adaptive_sparse_interval = 15
+
+        print(f"[INFO] Gemini 偵測器: model={self._model_name}, "
+              f"strategy={self._strategy}, interval={self._detect_interval}")
+
+    def _init_client(self):
+        """初始化 Gemini API client。"""
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        # 若環境變數未設定，嘗試讀取專案目錄的 .env 檔
+        if not api_key:
+            env_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), ".env")
+            if os.path.isfile(env_path):
+                with open(env_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("GEMINI_API_KEY="):
+                            api_key = line.split("=", 1)[1].strip()
+                        elif not api_key and line.startswith("GOOGLE_API_KEY="):
+                            api_key = line.split("=", 1)[1].strip()
+        if not api_key:
+            raise ValueError(
+                "未設定 Gemini API Key。請設定環境變數 GEMINI_API_KEY "
+                "或在專案目錄建立 .env 檔（GEMINI_API_KEY=your_key）")
+        from google import genai
+        self._client = genai.Client(api_key=api_key)
+
+    def _should_detect(self) -> bool:
+        """根據策略判斷是否該送 API 偵測。"""
+        n = self._call_count
+        if self._strategy == "every_2":
+            return n % 2 == 0
+        elif self._strategy == "every_n":
+            return n % self._detect_interval == 0
+        elif self._strategy == "adaptive":
+            if n < self._adaptive_dense_calls:
+                return n % 2 == 0  # 前期密集
+            return (n - self._adaptive_dense_calls) \
+                % self._adaptive_sparse_interval == 0
+        elif self._strategy == "first_only":
+            return n < 5  # 只偵測前 5 幀
+        return n % self._detect_interval == 0  # fallback
+
+    def _frame_to_pil(self, frame: np.ndarray):
+        """將 OpenCV BGR frame 轉為 PIL Image（縮小以省流量）。"""
+        from PIL import Image as PILImage
+        h, w = frame.shape[:2]
+        max_dim = self._max_image_size
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            new_w, new_h = int(w * scale), int(h * scale)
+            frame = cv2.resize(frame, (new_w, new_h),
+                               interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return PILImage.fromarray(rgb)
+
+    def _call_gemini(self, frame: np.ndarray) -> list[tuple]:
+        """呼叫 Gemini API 偵測機器人。"""
+        from google.genai import types
+        h, w = frame.shape[:2]
+        pil_img = self._frame_to_pil(frame)
+        img_w, img_h = pil_img.size  # 縮放後的尺寸
+
+        prompt = _GEMINI_PROMPT.format(width=img_w, height=img_h)
+
+        response_schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "bbox": {
+                        "type": "ARRAY",
+                        "items": {"type": "NUMBER"},
+                        "description": "Bounding box [x_left, y_top, x_right, y_bottom] in pixels"
+                    },
+                    "alliance": {
+                        "type": "STRING",
+                        "description": "Alliance color: red or blue"
+                    },
+                    "confidence": {
+                        "type": "NUMBER",
+                        "description": "Detection confidence 0.0-1.0"
+                    }
+                },
+                "required": ["bbox", "alliance", "confidence"]
+            }
+        }
+
+        try:
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=[pil_img, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=response_schema,
+                    temperature=0.1,
+                ),
+            )
+            self._api_call_count += 1
+        except Exception as e:
+            print(f"[WARN] Gemini API 呼叫失敗: {e}")
+            return []
+
+        # 解析回傳的 JSON
+        import json
+        try:
+            detections = json.loads(response.text)
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"[WARN] Gemini 回傳格式錯誤: {e}")
+            return []
+
+        # 轉換為標準格式 (x1, y1, x2, y2, conf, class_id)
+        # 如果影像有縮放，座標需要還原到原始尺寸
+        scale_x = w / img_w
+        scale_y = h / img_h
+
+        results = []
+        for det in detections:
+            bbox = det.get("bbox", [])
+            if len(bbox) != 4:
+                continue
+            alliance = det.get("alliance", "").lower()
+            conf = float(det.get("confidence", 0.5))
+
+            x1 = float(bbox[0]) * scale_x
+            y1 = float(bbox[1]) * scale_y
+            x2 = float(bbox[2]) * scale_x
+            y2 = float(bbox[3]) * scale_y
+
+            # 邊界檢查
+            x1 = max(0.0, min(x1, w))
+            y1 = max(0.0, min(y1, h))
+            x2 = max(0.0, min(x2, w))
+            y2 = max(0.0, min(y2, h))
+
+            if x2 - x1 < 5 or y2 - y1 < 5:
+                continue
+
+            class_id = 0 if alliance == "red" else 1
+            results.append((x1, y1, x2, y2, conf, class_id))
+
+        if self._api_call_count <= 3 or self._api_call_count % 50 == 0:
+            n_red = sum(1 for d in results if d[5] == 0)
+            n_blue = sum(1 for d in results if d[5] == 1)
+            print(f"[DIAG] Gemini 偵測 call#{self._api_call_count}: "
+                  f"Red={n_red} Blue={n_blue} total={len(results)}")
+
+        return results
+
+    def detect(self, frame: np.ndarray,
+               confidence: float | None = None,
+               robot_only: bool = True) -> list[tuple]:
+        """偵測機器人，根據策略決定是否呼叫 Gemini API。
+
+        非偵測幀回傳空 list，由 MOT 追蹤器用距離匹配維持追蹤。
+        """
+        should = self._should_detect()
+        self._call_count += 1
+
+        if not should:
+            return []
+
+        results = self._call_gemini(frame)
+
+        if confidence is not None:
+            results = [r for r in results if r[4] >= confidence]
+
+        return results
+
+    def detect_tiled(self, frame: np.ndarray,
+                     confidence: float | None = None,
+                     robot_only: bool = True,
+                     tile_size: int = 1280,
+                     overlap: float = 0.15) -> list[tuple]:
+        """Gemini 理解全幀語義，不需要 tiled 偵測。"""
         return []
 
     def get_class_name(self, class_id: int) -> str:

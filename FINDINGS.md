@@ -2,6 +2,310 @@
 
 *記錄開發過程中的技術發現和決策*
 
+## 2026-03-10 (#3): FRC 同賽事影片多解析度問題 + Gemini 504 空檔問題
+
+### 問題
+1. tuis 賽事中 qm1 影片為 640x360，qm2 以後為 1280x720，crop.json 用 qm1 校正後座標套到 qm2+ 完全錯位
+2. mndu 賽事 Gemini 標註時 API 回傳 504 錯誤，產生 58 個空的 label 檔案，但 pipeline 未檢測到
+
+### 發現
+
+**同賽事多解析度：**
+- TBA/YouTube 上同一 FRC 賽事的不同比賽影片可能有不同解析度
+- crop.json 的 crop 座標只對校正時的解析度有效
+- 需要記錄 base 解析度並按比例縮放
+
+**Gemini API 504 產生空檔：**
+- `auto_annotate.py` 在 API 錯誤時仍會建立空的 .txt 檔案
+- 重跑時檔案已存在所以跳過 → 永遠不會修復
+- 解決方式：刪除所有 0 bytes 的 label 檔案後重跑
+
+### 解決方案
+- **多解析度**: crop.json 新增 `base_w`/`base_h` 欄位，`crop_events.py` 讀取影片實際解析度後自動等比縮放 crop 座標，輸出統一 resize 到固定尺寸
+- **空檔問題**: 手動刪除空檔後重跑 Gemini 標註（未加入 pipeline 自動檢測，待後續優化）
+
+### 選擇理由
+- 等比縮放而非重新校正：保持原始 crop 校正不變，自動適配不同解析度，用戶不需為每個解析度重新校正
+- resize 統一輸出：確保所有訓練圖片尺寸一致，YOLO 訓練不受影響
+
+---
+
+## 2026-03-10 (#2): Google Docs 瀏覽器自動化的技術限制
+
+### 問題
+透過 Chrome 瀏覽器自動化（MCP）操作 Google Docs 時，遇到多個技術障礙導致無法使用常規 DOM 操作方式。
+
+### 發現
+
+**Canvas 渲染，非 DOM 文字：**
+- Google Docs 使用 `<canvas>` 元素渲染文字內容，而非傳統的 HTML DOM 節點
+- 無法透過 `document.querySelector` 或 `innerText` 直接存取或修改文件文字
+- 必須透過模擬鍵盤輸入（Ctrl+A, Ctrl+V 等）操作文件
+
+**Clipboard API 限制：**
+- `navigator.clipboard.writeText()` 在非 focused document 會拋出 `DOMException`
+- 解決方式：使用 legacy 方法 — 建立隱藏 `<textarea>`, 填入文字, `document.execCommand('copy')`
+- 此方式在 Google Docs 的 iframe 環境中可靠運作
+
+**Find & Replace 中文搜尋問題：**
+- Google Docs 的 Find & Replace 搜尋中文逗號等標點時可能因 Unicode 正規化差異找不到
+- 解決方式：使用較短的不含標點文字片段作為搜尋目標，避開容易出問題的 Unicode 字元
+
+**Ctrl+Z 副作用：**
+- Google Docs 的 Undo 堆疊是全域的，Ctrl+Z 會影響所有操作（包括透過自動化執行的操作）
+- 需謹慎使用，避免意外撤銷之前的有效操作
+
+### 選擇理由
+- 使用 legacy clipboard 方法雖然不如 Clipboard API 現代，但在 Google Docs 的 canvas 環境中更可靠
+- 模擬鍵盤操作是目前操作 Google Docs 的唯一可行方式（無公開的 DOM 文字節點）
+- 短文字搜尋片段犧牲精確度但避免 Unicode 相容性問題
+
+---
+
+## 2026-03-10: YOLOv26n vs YOLOv11n 模型訓練比較 + Colab GPU 額度限制
+
+### 問題
+原本使用 YOLOv11n 訓練完成且效果良好（mAP50=0.903），但用戶希望改用最新的 YOLOv26n 架構。重新訓練時遇到 Colab GPU 額度耗盡問題。
+
+### 發現
+
+**YOLOv11n 基線結果（已棄用）：**
+- mAP50=0.903, mAP50-95=0.478, P=0.891, R=0.862
+- 2,582,542 parameters, 6.3 GFLOPs
+- ONNX: 10.1 MB (opset 22)
+- 訓練時間: 0.205 hours (T4 GPU, 50 epochs)
+
+**YOLOv26n 最終結果：**
+- ONNX: 9.4 MB（比 YOLOv11n 小 7%）
+- 訓練在 Colab T4 GPU 完成
+
+**Colab GPU 額度耗盡解決方案：**
+- 用戶原帳號連續訓練 YOLOv11n 後額度用完
+- 解決方式：換另一個 Google 帳號，透過共用 Google Drive 資料夾存取同一份 yolo_dataset.zip
+- 共用 Drive 資料夾的檔案路徑格式：`/content/drive/Shareddrives/` 或 `My Drive` 下的共用捷徑
+
+### 選擇理由
+- YOLOv26n 是更新的架構，模型更小（9.4 vs 10.1 MB）
+- Colab 免費 T4 GPU 足以訓練 bumper 偵測這類小規模任務（817 張圖片 + 50 epochs）
+- 多帳號 + 共用 Drive 是繞過 Colab GPU 額度限制的實用方案
+
+---
+
+## 2026-03-09 (#3): Gemini flash-lite 全量標註 + 場地固定物件排除區域
+
+### 問題
+使用 gemini-3.1-flash-lite-preview 全量標註 2842 張圖片後，發現大量 false positive — 場地左右兩側固定物件（x≈0.14/0.874, y≈0.49）被頻繁誤框為 bumper，佔總偵測的 11%（784/7023）。
+
+### 發現
+
+**gemini-3.1-flash-lite-preview 標註速度穩定：**
+- 5 張測試：平均 3.1s/張，max 4.1s
+- 2842 張全量標註耗時約 3 小時（16 張/分鐘）
+- timeout 從 60s 安全降至 10s，無超時問題
+- 207 張（7.3%）Gemini 回傳空結果（開場畫面或場地全景），屬正常比例
+
+**場地固定物件大量誤框（FP 最大來源）：**
+- 場地左右兩側有固定結構物，外觀類似 bumper 的紅/藍色調
+- 位置穩定在 normalized 座標 (0.14, 0.49) 和 (0.874, 0.49)
+- 784 個 FP boxes（佔 raw 總量 11%），數量遠超預期
+- 解決方案：在 `auto_annotate.py` 加入 `_EXCLUSION_ZONES`（矩形排除區域列表）+ `_in_exclusion_zone()` 函數，bbox 中心落入排除區域則自動移除
+
+**最終過濾統計：**
+- Raw: 7023 boxes → 排除區域過濾 784 FP → 面積過濾 33 小框 → 有效 6206 boxes
+- Red=3325, Blue=2881（比例合理，略偏紅）
+- 2635 張有效圖片（207 張空標註被排除）→ train 2108 / val 527
+
+### 選擇理由
+- 排除區域過濾是針對特定場地固定物件的精準方案，不影響場上機器人偵測
+- 矩形區域定義簡單，支援多區域擴展，如有新場地只需調整座標
+- 先過濾 FP 再訓練，避免模型學到錯誤樣本
+
+---
+
+## 2026-03-09 (#2): Bumper-Only 標註策略 + 廣角幀清理 + 模型選擇
+
+### 問題
+Session 1 標註的是整台機器人 chassis bbox，但 HSV Bumper 偵測模式只需要 bumper 區域。此外，87 部影片中有 36 場使用廣角鏡頭，導致視角不一致，影響訓練品質。
+
+### 發現
+
+**Bumper-Only 標註更適合 HSV Bumper 偵測模式：**
+- 原始 prompt 框整台機器人 → bbox 偏大，包含非 bumper 區域（chassis、手臂等）
+- 改為只框機器人下方保險桿（bumper）→ bbox 更精確，與 HSV Bumper 偵測的輸出一致
+- 訓練目標從「偵測整台機器人」變為「偵測 bumper」，與實際應用場景吻合
+
+**廣角比賽幀的問題：**
+- 87 部影片中有 36 場使用廣角鏡頭（qm13-17, 19, 22, 28, 30-31, 33-34, 38, 41, 43-44, 46, 51-53, 57, 62-65, 67, 70, 73-74, sf2m1, sf3m1, sf5m1, sf8m1, sf11m1, sf12m1, sf13m1）
+- 廣角畫面機器人比例更小、邊緣畸變更大，混入訓練會降低模型對標準視角的偵測能力
+- 刪除 2340 張廣角幀，從 5182 張減至 2842 張，保留標準視角畫面
+
+**模型選擇 — gemini-3.1-flash-lite-preview vs gemini-2.5-flash：**
+- `gemini-2.5-flash`：偵測品質較好（3-6/img），但速度慢（~20s/img），2842 張需 ~16 小時
+- `gemini-3.1-flash-lite-preview`：偵測較少（1-3/img），但速度快（~3s/img），2842 張需 ~2.4 小時
+- 最終選擇 `gemini-3.1-flash-lite-preview`：速度優先，bumper 目標更明確可能補償偵測數量不足
+
+### 選擇理由
+- Bumper-only 標註與 HSV Bumper 偵測模式的輸出格式一致，訓練後可直接替換/輔助 HSV 偵測
+- 移除廣角幀確保訓練資料視角一致性
+- 快速模型+多次迭代 > 慢模型+一次標註，可以快速驗證 bumper-only 策略是否可行
+
+---
+
+## 2026-03-09: Gemini 自動標註 Pipeline — 模型選型、座標格式、批次標註
+
+### 問題
+需要批次標註 5182 張 FRC 比賽裁切幀的機器人 bounding box。上一 session (03-08) 發現 Gemini API 不穩定，本次 session 完成完整 pipeline 並大規模跑標註。
+
+### 發現
+
+**Gemini 模型+格式組合完整測試結果：**
+| 模型 | 輸出格式 | 結果 | 備註 |
+|------|----------|------|------|
+| `gemini-3-flash-preview` | structured JSON | 504 DEADLINE_EXCEEDED | 完全不可用 |
+| `gemini-2.5-flash` | structured JSON | 0 偵測 | schema 導致模型不輸出 bbox |
+| `gemini-3.1-flash-lite-preview` | native box_2d | 快但偵測少（1-3/img） | 輕量模型能力不足 |
+| **`gemini-2.5-flash`** | **native box_2d + 改良 prompt** | **3-6 偵測/img, ~20s/img** | **最終選擇** |
+
+**關鍵發現 — Structured JSON Output 導致偵測失效：**
+- `gemini-2.5-flash` 搭配 `response_schema` JSON schema 時回傳 0 偵測
+- 同樣模型用 unstructured response（自由文字）+ regex 解析反而正常（3-6 偵測/img）
+- 推測 structured output 的 schema 約束干擾了模型的 bounding box 生成能力
+- 結論：Gemini Vision 的 bounding box 功能應使用 native `box_2d` 格式，不要用 structured JSON
+
+**Gemini 原生 Bounding Box 座標格式：**
+- 格式：`box_2d: [y_min, x_min, y_max, x_max]`（注意 y 在前，非常規的 x,y 順序）
+- 座標範圍 0-1000（1000-based），不是像素值
+- 轉換公式：`pixel_x = x_coord / 1000 * width`, `pixel_y = y_coord / 1000 * height`
+- 解析方式：regex `box_2d.*?\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]` 從 unstructured response 提取
+
+**改良 Prompt 大幅提升偵測品質：**
+- 原始 prompt 只說「偵測機器人」→ 偵測少（1-2/img）、漏偵測多
+- 改良 prompt 強調「全場掃描」+「所有機器人 chassis（非只有 bumper）」+「紅藍各 3 台」→ 偵測量提升到 3-6/img
+- 約 35% 圖片仍無偵測（false negative + API error），但 65% 有偵測的品質尚可
+
+**批次標註統計：**
+- Batch 1 (qm1-qm10): 548 張, 533 OK / 14 empty / 6 err, 原始 2172 boxes
+- Batch 2 (qm11-qm74+sf+f): 550/4634 完成時 session 結束
+- 最終匯出 YOLO 資料集：665 imgs (532 train / 133 val), 3085 boxes (R=1426 B=1659)
+- 約 35% 圖片小 bbox 被面積過濾（Gemini 傾向只框 bumper，bbox 偏小）
+
+**HttpOptions timeout 修正：**
+- 預設 API timeout 導致 `gemini-2.5-flash` 偶爾超時
+- 需在 `_init_gemini()` 中加入 `HttpOptions(timeout=120000)`（120 秒）
+
+### 選擇理由
+- `gemini-2.5-flash` + native box_2d 是品質/速度/穩定性的最佳平衡
+- Unstructured response + regex 解析雖然不優雅，但是目前唯一穩定出結果的方式
+- 自動標註+人工抽驗 vs 純手動標註，效率提升 10-50x
+
+---
+
+## 2026-03-08: TBA 影片連結 vs. YouTube 官方播放清單
+
+### 問題
+用 TBA API 取得的比賽影片連結（第一個）通常是觀眾/團隊自行拍攝的視角，品質不穩定、視角不一致，不適合作為 YOLO 訓練資料。
+
+### 發現
+- TBA 每場比賽可能有多個影片連結，第一個通常不是官方影片
+- FRC 官方比賽影片統一放在 YouTube 播放清單，例如 2024 Magnolia Regional: `PLXMtScTweiUEnho5azcuN_LmKOEk4690v`
+- 官方影片品質穩定（720p）、視角一致（固定高角度俯瞰）、有計分板 overlay
+- `match_videos.json` 更新為選取第二個影片連結（通常為官方），實測 10 部影片全部正確
+
+### 選擇理由
+- 訓練資料需要一致的視角和品質，官方影片是最佳來源
+- 10 部影片提取 550 幀（每 3 秒一幀），資料量足夠 YOLO 訓練
+
+---
+
+## 2026-03-08: Gemini 自動標註 FRC 機器人 — 模型評估與座標格式
+
+### 問題
+需要大量標註 FRC 比賽影片幀中的機器人 bounding box 來訓練 YOLO 模型，手動標註成本太高，嘗試用 Gemini Vision API 自動標註。
+
+### 發現
+
+**Gemini 模型品質差異極大：**
+| 模型 | 結果 | 備註 |
+|------|------|------|
+| `gemini-3-flash-preview` (AI Studio) | 6/6 偵測正確 | Thinking High 模式，~3 分鐘/張 |
+| `gemini-3-flash-preview` (API) | 504 超時 | 不穩定，經常逾時 |
+| `gemini-2.5-flash` (API) | 偵測品質極差 | 框在觀眾席，完全不可用 |
+| `gemini-2.0-flash` (API) | 404 已停用 | 模型已下線 |
+
+**Gemini 座標格式是 1000-based（非像素）：**
+- 回傳的 bounding box 座標範圍 0-1000，不是實際像素座標
+- 轉換公式：`pixel_x = coord / 1000 * image_width`，`pixel_y = coord / 1000 * image_height`
+- 格式：`[y_min, x_min, y_max, x_max]`（注意 y 在前）
+
+**裁切畫面大幅改善標註品質：**
+- FRC 比賽直播畫面包含底部計分板 + 多視角小窗
+- 不裁切 → Gemini 會把小窗/觀眾席的人誤偵測為機器人
+- 裁切到主場地區域後，偵測精確度從 ~30% 提升到 ~100%
+
+**Gemini 框偏小（~50-70px）：**
+- 傾向只框 bumper 區域而非整台機器人
+- 需要後處理放大 bounding box（可按比例擴展 1.5-2x）
+
+### 選擇理由
+- Gemini Vision 是目前免費/低成本的最佳自動標註方案（vs. 手動標註、vs. 付費標註服務）
+- `gemini-3-flash-preview` 品質最好但 API 不穩定，需探索批次策略
+- 裁切 + 後處理放大的 pipeline 架構可以補償 Gemini 的偵測偏差
+
+---
+
+## 2026-03-02: 機器人追蹤失效根因分析 + 替代方案研究
+
+### 問題
+機器人追蹤完全失效 — HSV Bumper 模式在實際比賽影片中追蹤不到任何機器人，導致射手歸因、球所有權等功能連帶無法工作。
+
+### 根因診斷（3 個 P0 致命問題）
+
+**P0-1: 背景模型前景遮罩過度過濾（最致命）**
+- `app.py` 在偵測前用 `cv2.bitwise_and(frame, frame, mask=fg_mask)` 把「背景」像素設黑
+- Temporal Median 背景模型取樣 50 幀計算中位數 → 機器人出現在取樣幀中 → 被納入背景
+- 靜止/慢移機器人的 absdiff 很小 → 被誤判為背景 → bumper 像素被抹黑
+- HSV 過濾在全黑像素上找不到紅/藍 → 零偵測
+
+**P0-2: BG_FG_THRESHOLD=30 太敏感**
+- absdiff > 30 才判為前景，但靜止機器人 absdiff ≈ 15-20
+- 場地燈光均勻時機器人與背景差異更小
+
+**P0-3: Temporal Median 在 FRC 場景不適用**
+- 背景假設「機器人不在場」但 FRC 比賽機器人始終在場
+- 中位數背景包含機器人像素 → absdiff 天然偏小
+
+**P1: 模板匹配邏輯陷阱**
+- 有模板但無匹配時全部候選被棄（雖然此時候選已為空）
+- HSV 飽和度門檻 S≥120 在比賽場地混合燈光下過高
+
+### 外部研究：替代方案
+
+**色彩空間改進：**
+- YCrCb 色彩空間：Cr 通道直接分離紅色（無 HSV 色相環繞問題），Cb 分離藍色
+- CLAHE 自適應直方圖均衡化：改善場地燈光不均
+- 多色彩空間投票：HSV + YCrCb 聯集提高召回率
+
+**零樣本偵測模型（不需訓練）：**
+- YOLO-World：用 "red bumper"/"blue bumper" 文字提示偵測，可匯出 ONNX
+- YOLOE (ICCV 2025)：支援圖像提示，用戶框選 bumper → 自動偵測同類
+- Roboflow Universe 預訓練模型：多個 FRC 團隊的現成模型可直接使用
+
+**追蹤算法：**
+- SportSORT (2025)：運動域特定追蹤，利用隊伍顏色做 Re-ID，HOTA 81.3%
+- BoT-SORT：結合運動+外觀資訊
+- 當前距離匹配+直方圖 Re-ID 已類似簡化版 BoT-SORT
+
+**FRC 社群最佳實踐（Roboflow Robot Path Mapping）：**
+- 偵測目標是 bumper（非整個機器人）→ 跨年份通用
+- 用 YOLO 訓練模型偵測 bumper bounding box（而非純 HSV）
+- 追蹤用純距離匹配（與我們方案一致）
+- 紅藍分開追蹤，每隊固定 3 台
+
+### 決策
+待定 — 需用戶確認修復方向後實施
+
+---
+
 ## 2026-02-14: Hub 得分區域改為多邊形
 
 ### 問題
@@ -1051,6 +1355,36 @@ YOLO 機器人偵測模型（`frc_robot.onnx`）依賴訓練資料，而 2017 St
 - 攝影機必須固定（若攝影機平移/縮放，背景模型失效）
 - 靜止超過半數取樣幀的機器人可能被視為背景（但 FRC 比賽中機器人很少靜止不動）
 - 建立背景模型需要讀取影片多次（~50 幀），分析開始前有額外延遲
+
+---
+
+## 2026-02-28: 播放卡頓修復 — 牆鐘時間同步改為固定步進
+
+### 問題
+分析完成後播放影片時出現間歇性卡頓 — 播放一小段後會卡住一下再繼續。
+
+### 原因
+2026-02-14 實作的牆鐘時間同步（wall-clock time base）在 overlay 渲染較重的場景下會累積落後：
+1. 每次 `_play_loop()` 計算 `target_frame = start_frame + elapsed * fps * speed`
+2. 渲染重的幀（有大量機器人追蹤 overlay）耗時超過 33ms（30fps 的幀間隔）
+3. 下一 tick 發現落後多幀 → 一次跳大步追趕 → 畫面跳躍 → 視覺卡頓
+4. 第一次修復（加入落後>10幀重設基準 + 最小delay 1ms→10ms）只是治標，間歇卡頓仍存在
+
+### 解決方案
+**完全移除牆鐘時間同步**，改為固定步進模式：
+1. 每次 `_play_loop()` tick 固定前進 `step = fps / 30 * speed` 幀（浮點累加避免截斷誤差）
+2. 渲染完一幀後立即排程下一 tick（`self.after(10, self._play_loop)`）
+3. 渲染慢就自動降低實際播放速度 — 每 tick 只前進固定步數，不會為了追趕而跳幀
+4. 移除了 `_play_wall_start` 和 `_play_start_frame` 在 `_play_loop` 中的使用
+
+### 選擇理由
+- **固定步進 vs 牆鐘同步**: 牆鐘同步在渲染穩定時表現完美，但 overlay 渲染成本不可預測（取決於當前幀的機器人數量、球軌跡數量等）。固定步進犧牲嚴格的播放速度精確度，換取零卡頓的使用者體驗
+- **自動降速 vs 跳幀追趕**: 跳幀追趕導致視覺不連貫（卡頓感），自動降速讓畫面始終流暢，用戶幾乎察覺不到速度微降
+- **推翻 2026-02-14 決策**: 原本牆鐘時間基準的設計假設是「每幀處理時間穩定」，但加入機器人追蹤 overlay 後這個假設不再成立。固定步進更符合「分析後播放」的使用模式（不是即時播放器，不需要嚴格的速度精確度）
+- **保留 `_play_wall_start` 初始化**: `_toggle_play` 和 `_toggle_speed` 中仍保留初始化但 `_play_loop` 不再讀取，未來如需回到牆鐘模式可快速恢復
+
+### 關鍵學習
+> 播放系統的設計取決於使用場景。**即時影片播放器**需要牆鐘同步（確保 1 真實秒 = fps 幀），但**分析結果回放**更在乎視覺流暢度 — 寧可速度不完美精確，也不能有卡頓。
 
 ---
 *Created: 2026-02-14*

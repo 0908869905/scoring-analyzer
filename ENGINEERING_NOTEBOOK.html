@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>FRC Scoring Analyzer — 工程筆記</title>
+<style>
+body { font-family: 'Noto Sans TC', 'Microsoft JhengHei', sans-serif; max-width: 780px; margin: 40px auto; padding: 0 20px; line-height: 1.9; color: #222; font-size: 11pt; }
+h1 { font-size: 22pt; border-bottom: 3px solid #1a5276; padding-bottom: 6px; margin-bottom: 4px; }
+h2 { font-size: 16pt; color: #1a5276; margin-top: 32px; border-bottom: 1px solid #bbb; padding-bottom: 4px; }
+h3 { font-size: 13pt; color: #2c3e50; margin-top: 20px; }
+p { margin: 6px 0; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+th, td { border: 1px solid #bbb; padding: 6px 10px; text-align: left; font-size: 10.5pt; }
+th { background: #2c3e50; color: white; }
+tr:nth-child(even) { background: #f5f5f5; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 3px 0; }
+.flow { background: #f0f4f8; border: 1px solid #ccc; border-radius: 8px; padding: 10px 16px; margin: 10px 0; font-size: 10.5pt; line-height: 1.7; }
+.flow b { color: #1a5276; }
+.highlight { background: #fff3cd; padding: 8px 14px; border-left: 4px solid #f0ad4e; margin: 10px 0; border-radius: 4px; }
+.fail { background: #fce4e4; padding: 8px 14px; border-left: 4px solid #d9534f; margin: 10px 0; border-radius: 4px; }
+.success { background: #dff0d8; padding: 8px 14px; border-left: 4px solid #5cb85c; margin: 10px 0; border-radius: 4px; }
+.subtitle { color: #666; font-size: 11pt; }
+.small { font-size: 9.5pt; color: #888; }
+</style>
+</head>
+<body>
+
+<h1>FRC Scoring Analyzer — 工程筆記</h1>
+<p class="subtitle"><b>隊伍軟體組 ｜ 2026 賽季</b><br>專案：比賽影片自動進球偵測分析工具</p>
+
+<!-- ==================== 1 ==================== -->
+<h2>1. 專案背景</h2>
+
+<h3>為什麼要做這個？</h3>
+<p>今年賽季開始後，我們發現一個問題：每次看完比賽影片，大家對「誰進了幾球」都各有各的說法。手動計數很容易看漏，尤其 Teleop 階段 6 台機器人在場上跑來跑去，球飛來飛去，靠人眼真的不太行。</p>
+<p>搜了一圈現成工具，FRC scouting app 全都是手動記錄的。我們想要的是：<b>丟一個比賽影片進去，自動告訴我每台機器人進了幾球、命中率多少</b>。所以決定自己寫。</p>
+
+<h3>競品調查</h3>
+<p>Chief Delphi 上找到 Team 5951 做過影片分析系統（YOLO 偵測球和機器人），但綁定特定賽季模型、需要大量標註資料。我們想做更通用的版本——盡量不依賴每年重訓的模型。</p>
+
+<h3>技術選型</h3>
+<table>
+<tr><th>方案</th><th>優點</th><th>缺點</th><th>結論</th></tr>
+<tr><td>全用 YOLO AI</td><td>精確度高</td><td>需大量標註、每年重訓</td><td>太重</td></tr>
+<tr><td>全用 HSV 色彩過濾</td><td>簡單、免訓練</td><td>受燈光影響</td><td>球偵測可以，機器人不夠</td></tr>
+<tr><td>HSV + AI 混合</td><td>取兩者長處</td><td>系統較複雜</td><td><b>採用</b></td></tr>
+</table>
+
+<p>最後決定：球偵測用 HSV（黃色球顏色鮮豔，過濾就夠）、機器人偵測用 HSV Bumper 為主 + YOLO 備選、GUI 用 CustomTkinter（Python 生態熟悉、暗色主題看影片舒服）。</p>
+
+<!-- ==================== 2 ==================== -->
+<h2>2. 系統架構</h2>
+
+<div class="flow">
+<b>使用者介面</b>（主視窗 + 設定面板）<br>
+　　↓<br>
+<b>分析管線</b>（逐幀處理）<br>
+　├─ 球偵測（HSV 色彩過濾 / AI 備用）→ 球追蹤（質心匹配）<br>
+　├─ 機器人偵測（HSV Bumper / YOLO）→ 機器人追蹤（距離匹配 + Re-ID）<br>
+　├─ 背景模型（自動前景分離）<br>
+　└─ 進球判定 + 射手歸因 + 出手偵測<br>
+　　↓<br>
+<b>輸出</b>：得分統計表 / 進球事件時間軸 / CSV 匯出
+</div>
+
+<p><b>每一幀的處理流程：</b></p>
+<div class="flow">
+讀取影片幀 → 裁切分析區域 → 背景遮罩（觀眾席變黑）→ 球偵測（找黃色物體）→ 球追蹤（連接同一顆球）→ 機器人偵測（找紅藍 Bumper）→ 機器人追蹤（辨識是哪台）→ 進球判定 → 記錄事件
+</div>
+
+<!-- ==================== 3 ==================== -->
+<h2>3. 球偵測</h2>
+
+<h3>HSV 色彩過濾（採用方案）</h3>
+<p>FRC 的球是亮黃色的，在 HSV 色彩空間裡很容易跟背景分開。</p>
+
+<div class="flow">
+<b>處理流程：</b><br>
+原始影像 → 高斯模糊（消除運動模糊）→ 轉 HSV → 黃色範圍過濾 → Close 形態學 7×7（把碎裂的球補成整塊）→ Open 形態學 3×3（去小噪點）→ 找輪廓 → 面積過濾 → 輸出球位置
+</div>
+
+<div class="fail">
+<b>踩坑：</b>形態學順序寫反了（先 Open 再 Close），球偵測直接壞掉。原因是球的色彩 mask 本身有洞，先 Open 會把碎片全刪掉，Close 也救不回來。改成<b>先 Close 再 Open</b> 之後恢復正常。
+</div>
+
+<p><b>GPU 加速：</b>4K 影片很大，我們用 OpenCV 的 UMat（OpenCL）把五個影像處理步驟全丟到 GPU 上跑，最後才把結果拉回 CPU。整個管線只有一次上傳和一次下載。</p>
+
+<h3>AI 模式（試過但放棄了）</h3>
+<p>也試過 YOLO 做球偵測，近距離效果不錯（信心值 0.67），但<b>遠距離完全不行</b>。原因：訓練資料是近距離球特寫，比賽影片是廣角遠景，球只有十幾像素。後來決定球偵測就用 HSV——黃色球在任何距離都是黃色的。</p>
+
+<h3>HSV 自動校正</h3>
+<p>每個場地燈光不同，HSV 參數也要跟著調。我們做了自動校正：用戶在影片上點幾下球的位置，系統用 K-Means 分離球色 vs 背景，再用百分位法自動算出 HSV 範圍。比手動調 slider 快很多。</p>
+
+<!-- ==================== 4 ==================== -->
+<h2>4. 機器人偵測</h2>
+
+<p>這塊改了好幾版，是整個專案花最多力氣的部分。</p>
+
+<h3>第一版：YOLO 偵測</h3>
+<p>用 Roboflow 的 Main Robot Detection 資料集（1,172 張，Red / Blue 兩類），在 Google Colab 免費 T4 GPU 上訓練 YOLOv11n，約 30 分鐘練完，匯出 ONNX（10.1 MB）。</p>
+
+<div class="fail">
+<b>踩坑 1 — 資料集選錯：</b>一開始選了 WorBots 4145 資料集（3,291 張），但類別超雜，模型把記分板、音箱都框成「機器人」。改成只有 Red/Blue 兩類的資料集後解決。
+</div>
+<div class="fail">
+<b>踩坑 2 — 類別名稱不相容：</b>換資料集後偵測器零輸出。查了半天發現過濾函式只認 "red_robot"，新資料集叫 "Red"，全被過濾掉了。教訓：<b>換資料集要同步檢查類別名稱相容性</b>。
+</div>
+
+<h3>第二版：HSV Bumper 偵測（現在的預設）</h3>
+<p>Bumper（防撞條）每年都有，而且一定是紅色或藍色（FRC 規則規定）。所以做了 HSV 偵測器找紅藍矩形色塊。</p>
+
+<div class="flow">
+<b>處理流程：</b><br>
+模糊 + HSV 轉換 → 紅色過濾（兩段範圍，處理 Hue 環繞）→ 藍色過濾 → 合併 → 矩形核形態學（Bumper 是扁的）→ 輪廓偵測 → 面積 + 長寬比過濾 → NMS 去重 → 模板匹配過濾（可選）
+</div>
+
+<div class="highlight">
+<b>設計細節：</b>紅色在 HSV 裡 Hue 值跨越 0 度（會環繞），必須做兩次過濾再合併。形態學用矩形核（9×5）而非正方形，因為 Bumper 是水平長條形。
+</div>
+
+<p><b>Bumper 模板匹配：</b>用戶可以在影片上點幾下機器人的 Bumper，系統建立 HSV 直方圖模板，分析時只保留跟模板相似的偵測結果，過濾掉觀眾衣服、標示牌等假陽性。</p>
+
+<!-- ==================== 5 ==================== -->
+<h2>5. 多目標追蹤（MOT）</h2>
+
+<h3>ByteTrack 的失敗</h3>
+<p>這是我們最大的一次踩坑。ByteTrack 用 IoU（框的重疊面積）來配對前後幀的偵測結果，一般場景很好用，但在我們這裡<b>完全失效</b>。</p>
+
+<div class="fail">
+<b>原因：</b>4K 影片裡機器人的框只有約 25 像素，但每幀移動 30~50 像素。框的位移比框本身還大，前後幀完全不重疊，IoU 永遠是 0，配對全失敗。1200 幀裡只成功配對 11 次（覆蓋率 5.4%）。
+</div>
+
+<h3>我們的解法：距離匹配</h3>
+<p>改用距離來配對。同一台機器人在連續幀之間位置不會差太遠。</p>
+
+<div class="flow">
+<b>匹配流程：</b><br>
+1. 每台已追蹤的機器人，用速度預測下一幀位置<br>
+2. 計算所有「預測位置 ↔ 偵測結果」的距離<br>
+3. 加入顏色直方圖 Re-ID：外觀不像的候選距離會被拉遠<br>
+4. 全域最短距離優先，貪心配對<br>
+5. 距離超過閾值的不配對（視為新目標）
+</div>
+
+<h3>修復前後對比</h3>
+<table>
+<tr><th>指標</th><th>ByteTrack（IoU）</th><th>距離匹配（修復後）</th></tr>
+<tr><td>機器人偵測次數</td><td>11</td><td>1,000</td></tr>
+<tr><td>插值後涵蓋幀數</td><td>11</td><td>4,521</td></tr>
+<tr><td>幀覆蓋率</td><td>5.4%</td><td><b>100%</b></td></tr>
+<tr><td>Blue 機器人追蹤</td><td>0 台</td><td>5 台</td></tr>
+</table>
+
+<div class="success">
+<b>關鍵教訓：</b>不要假設現成演算法一定適用自己的場景。ByteTrack 在一般監控影片上很好用，但在 4K 高速小目標場景完全不行。
+</div>
+
+<h3>後處理 Label 合併</h3>
+<p>機器人被遮擋後重新出現會被分配新 ID。分析完成後做後處理：同聯盟、時間不重疊、位置接近的 label 自動合併。Red 的 label 數從 7 個降到接近預期的 3 個。</p>
+
+<!-- ==================== 6 ==================== -->
+<h2>6. 進球判定與射手歸因</h2>
+
+<h3>進球判定</h3>
+<p>用戶在影片上標記 Hub 位置（多邊形），分析時每幀用 Ray Casting 射線法檢查球是否在多邊形內。球要在 Hub 裡待滿 3 幀才算進球，進球後 10 幀冷卻避免重複計數。</p>
+
+<h3>三層射手歸因</h3>
+<table>
+<tr><th>優先順序</th><th>方法</th><th>說明</th></tr>
+<tr><td>第一層</td><td>HP 線段歸因</td><td>球軌跡靠近人類玩家投射線 → 自動進球，不需機器人</td></tr>
+<tr><td>第二層</td><td>球所有權歸因</td><td>追蹤每顆球「屬於」哪台機器人，球被射出時的 owner = 射手。球在空中時鎖定 owner 不變</td></tr>
+<tr><td>第三層</td><td>鄰近歸因（兜底）</td><td>回溯進球前 0.5 秒，找 500px 內最近的機器人</td></tr>
+</table>
+
+<h3>射手重新歸因</h3>
+<p>第一次歸因只成功 7%（42 球歸因到 3 球），因為進球那一幀機器人可能沒被偵測到。加了後處理步驟：用合併 + 插值後的完整軌跡重新匹配射手。</p>
+<div class="success">
+<b>結果：</b>射手歸因率 7% → <b>47%</b>。改善明顯但仍有提升空間。
+</div>
+
+<h3>出手偵測</h3>
+<p>找球速度突增的點（球被打出的瞬間）+ 球往上飛 + 附近有機器人 → 判定為出手。追蹤球後續是否進 Hub：進了 = goal，沒進 = miss。有了這個就能算命中率。</p>
+
+<!-- ==================== 7 ==================== -->
+<h2>7. 背景模型</h2>
+
+<p>比賽影片裡觀眾席、計分板的顏色會干擾偵測。一開始用手動畫多邊形遮罩，但每換影片都要重畫，很麻煩。</p>
+
+<h3>Temporal Median 自動背景</h3>
+
+<div class="flow">
+<b>原理：</b>場地和觀眾席是不動的，機器人和球是快速移動的。<br><br>
+1. 從影片均勻取 50 幀<br>
+2. 每個像素位置取中位數 → 得到一張「乾淨的背景圖」<br>
+3. 分析時：每幀減去背景圖，差異大的地方 = 前景（機器人和球）<br>
+4. 背景區域設為黑色，偵測器只看前景
+</div>
+
+<div class="highlight">
+<b>為什麼用中位數？</b>中位數對離群值穩健。如果某幾幀剛好有機器人停在某處，平均數會被拉偏，中位數不會。效果比手動畫遮罩好太多了。
+</div>
+
+<!-- ==================== 8 ==================== -->
+<h2>8. 播放系統優化</h2>
+
+<p>測試影片是 4K HEVC 60fps，一開始播放卡到不行。</p>
+
+<table>
+<tr><th>瓶頸</th><th>問題</th><th>解法</th><th>效果</th></tr>
+<tr><td>縮放太慢</td><td>LANCZOS4 每幀 14ms</td><td>播放時改用 LINEAR</td><td>14ms → 0.04ms（快 350 倍）</td></tr>
+<tr><td>解碼不夠快</td><td>HEVC 4K 解碼只有 26fps</td><td>固定 30fps 顯示 + grab() 跳幀</td><td>不用每幀都解碼</td></tr>
+<tr><td>播放卡頓</td><td>牆鐘同步追趕時跳大步</td><td>改固定步進</td><td>渲染慢自動降速，不卡頓</td></tr>
+</table>
+
+<!-- ==================== 9 ==================== -->
+<h2>9. 開發迭代歷史</h2>
+
+<table>
+<tr><th>日期</th><th>做了什麼</th><th>結果</th></tr>
+<tr><td>02-14</td><td>專案初始化 + 基本框架</td><td>可以跑，但偵測不太到</td></tr>
+<tr><td>02-15</td><td>AI 球偵測改本地 ONNX 推理</td><td>離線可用，遠距偵測不行</td></tr>
+<tr><td>02-19</td><td>機器人偵測器 + MOT 追蹤框架</td><td>框架完成，缺模型</td></tr>
+<tr><td>02-21</td><td>Colab T4 GPU 訓練 YOLO 模型</td><td>MOT 模式可用了</td></tr>
+<tr><td>02-23</td><td>修 4K 球偵測 + GPU 加速</td><td>球偵測恢復正常</td></tr>
+<tr><td>02-23</td><td>ByteTrack → 距離匹配</td><td>覆蓋率 5% → 100%</td></tr>
+<tr><td>02-23</td><td>射手重新歸因</td><td>歸因率 7% → 47%</td></tr>
+<tr><td>02-26</td><td>HSV Bumper 偵測器</td><td>不用 YOLO 也能偵測機器人</td></tr>
+<tr><td>02-27</td><td>Temporal Median 背景模型</td><td>自動過濾觀眾席</td></tr>
+<tr><td>02-28</td><td>Bumper 取色 + 模板匹配 + 播放修復</td><td>減少假陽性、播放不卡了</td></tr>
+</table>
+
+<!-- ==================== 10 ==================== -->
+<h2>10. 反思與未解問題</h2>
+
+<h3>學到的教訓</h3>
+<ol>
+<li><b>不要假設現成演算法一定適用</b> — ByteTrack 在 4K 小目標場景完全失效，自己寫距離匹配反而更好</li>
+<li><b>訓練資料要跟實際場景一致</b> — 近距離球特寫訓練出來的模型，遠距離完全不認識球</li>
+<li><b>參數要隨解析度調整</b> — 4K 下的面積閾值、距離閾值跟 1080p 差很多</li>
+<li><b>簡單方法有時候比複雜方法穩</b> — HSV 色彩過濾比 AI 模型更適合球偵測</li>
+</ol>
+
+<h3>目前未解的問題</h3>
+<ul>
+<li>HSV Bumper 模式在實際影片上偵測不穩定，機器人追蹤仍會失效</li>
+<li>射手歸因率 47% 還不夠高，目標 70%+</li>
+<li>不同場地的參數差異大，自動適配還沒做好</li>
+</ul>
+
+<!-- ==================== 11 ==================== -->
+<h2>11. 未來展望</h2>
+
+<table>
+<tr><th>時程</th><th>目標</th></tr>
+<tr><td>短期（本賽季）</td><td>修復 Bumper 偵測、歸因率提升到 70%+、實際比賽驗證</td></tr>
+<tr><td>中期</td><td>批次分析多場比賽、自動高光剪輯、改善 UI/UX</td></tr>
+<tr><td>長期</td><td>Web 應用化、3D 軌跡重建、Transformer 追蹤器</td></tr>
+</table>
+
+<!-- ==================== 附錄 ==================== -->
+<h2>附錄：技術棧與關鍵參數</h2>
+
+<table>
+<tr><th>技術</th><th>用途</th></tr>
+<tr><td>Python 3.11 + CustomTkinter</td><td>主程式 + GUI</td></tr>
+<tr><td>OpenCV 4.9（含 OpenCL UMat）</td><td>影像處理 + GPU 加速</td></tr>
+<tr><td>onnxruntime（CUDA / DirectML / CPU）</td><td>YOLO 模型推理</td></tr>
+<tr><td>NumPy + SciPy</td><td>數值計算 + 匹配演算法</td></tr>
+</table>
+
+<table>
+<tr><th>參數</th><th>值</th><th>用途</th></tr>
+<tr><td>球 HSV 範圍</td><td>H:20~35, S:100~255, V:100~255</td><td>黃色球偵測</td></tr>
+<tr><td>球面積範圍</td><td>50 ~ 50,000 px²</td><td>過濾噪點和背景</td></tr>
+<tr><td>追蹤匹配距離</td><td>400 px（動態縮放）</td><td>距離式 Re-ID 閾值</td></tr>
+<tr><td>進球停留確認</td><td>3 幀</td><td>避免飄過邊緣誤判</td></tr>
+<tr><td>射手歸因距離</td><td>500 px</td><td>4K 下球飛到 Hub 的距離</td></tr>
+<tr><td>背景差異閾值</td><td>30</td><td>前景 / 背景分離</td></tr>
+</table>
+
+<hr>
+<p class="small">最後更新：2026-03-01</p>
+
+</body>
+</html>

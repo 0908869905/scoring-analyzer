@@ -1,0 +1,163 @@
+The scoring volume and speed in this competition far exceed the limits of manual human counting.
+Approach: HSV + AI hybrid — combining the strengths of both. More complex system, but the most balanced. Adopted.
+Ball detection uses HSV (the yellow ball has a distinct color, filtering is enough). Robot detection primarily uses YOLO to detect bumpers, with HSV as backup. GUI uses CustomTkinter (familiar Python ecosystem, dark theme is comfortable for viewing).
+
+
+System Architecture
+
+User Interface (main window + settings panel)
+    ↓
+Analysis Pipeline (frame-by-frame processing)
+  ├─ Ball Detection (HSV color filtering / AI backup) → Ball Tracking (centroid matching)
+  ├─ Robot Detection (YOLO / HSV Bumper) → Robot Tracking (distance matching + Re-ID)
+  ├─ Background Model (automatic foreground separation)
+  └─ Goal Detection + Shooter Attribution + Shot Detection
+    ↓
+Output: Scoring statistics / Goal event timeline / CSV export
+
+Per-frame processing flow:
+Read video frame → Crop analysis region → Background mask (black out spectator areas) → Ball detection (find yellow objects) → Ball tracking (link same ball across frames) → Robot detection (find red/blue bumpers) → Robot tracking (identify which robot) → Goal detection → Log event
+
+
+
+
+
+
+
+
+
+
+Ball Detection:
+HSV Color Filtering (adopted approach)
+FRC balls are bright yellow, making them easy to separate from the background in HSV color space.
+
+Processing flow: Raw image → Gaussian blur (reduce motion blur) → Convert to HSV → Yellow range filtering → Close morphology 7x7 (fill fragmented ball masks into solid blobs) → Open morphology 3x3 (remove small noise) → Find contours → Area filtering → Output ball positions
+
+Problem encountered along the way: We accidentally reversed the morphology order (Open before Close), and ball detection completely broke. The reason is that the ball's color mask has holes in it — doing Open first deletes all the fragments, and Close can't recover them. Switching to Close first, then Open fixed it.
+
+AI Mode (abandoned)
+
+We also tried YOLO for ball detection. It worked well up close (confidence 0.67), but completely failed at long range. The reason: training data was close-up ball shots, but match videos are wide-angle views where balls are only about ten pixels. We decided to stick with HSV — a yellow ball is yellow at any distance.
+
+HSV Auto-Calibration
+
+Every venue has different lighting, so HSV parameters need to be adjusted accordingly. Solution: auto-calibration — the user clicks a few ball locations in the video, the system uses K-Means to separate ball color vs. background, then uses percentile-based methods to automatically compute the HSV range. Much faster than manually tweaking sliders.
+
+
+
+
+
+
+
+
+
+
+
+
+Robot Detection
+
+Version 1: YOLO Detection
+
+Used Roboflow's Main Robot Detection dataset (1,172 images, Red/Blue two classes), trained YOLOv11n on Google Colab's free T4 GPU, took about 30 minutes, exported to ONNX (10.1 MB).
+
+Problem encountered along the way:
+We initially picked the WorBots 4145 dataset (3,291 images), but the classes were too messy — the model was boxing scoreboards and speakers as "robots." Switching to the dataset with only Red/Blue two classes fixed it.
+
+Version 2: HSV Bumper Detection
+
+Bumpers exist every year, and they're always red or blue (FRC rules require it). So we built an HSV detector to find red/blue rectangular color blobs.
+
+Processing flow: Blur + HSV conversion → Red filtering (two ranges, handling Hue wraparound) → Blue filtering → Merge → Rectangular kernel morphology (bumpers are flat) → Contour detection → Area + aspect ratio filtering → NMS deduplication → Template matching filter (optional)
+
+Design detail: Red in HSV has a Hue value that crosses 0 degrees (it wraps around), so we must filter twice and merge. The morphology kernel is rectangular (9x5) instead of square, because bumpers are horizontal strips.
+
+Bumper template matching: Users can click a few robot bumpers in the video, and the system builds HSV histogram templates. During analysis, only detections that match the template are kept, filtering out false positives like spectator clothing and signs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Multi-Object Tracking (MOT)
+
+Problem: ByteTrack uses IoU (bounding box overlap) to match detections across frames. It works great in typical scenarios, but completely failed here.
+
+Reason: In 4K video, robot bounding boxes are only about 25 pixels, but they move 30~50 pixels per frame. The displacement is larger than the box itself — consecutive frames have zero overlap, IoU is always 0, and all matches fail. Out of 1,200 frames, only 11 successful matches (5.4% coverage).
+
+Solution: Distance Matching
+
+We switched to distance-based matching. The same robot won't be too far away between consecutive frames.
+
+Matching flow:
+1. For each tracked robot, predict next-frame position using velocity
+2. Compute distances between all predicted positions and detections
+3. Add color histogram Re-ID: candidates that look different get their distance penalized
+4. Global shortest-distance-first, greedy matching
+5. Distances exceeding the threshold are not matched (treated as new targets)
+
+Before vs. after comparison:
+Robot detection count: ByteTrack 11 → Distance matching 1,000
+Interpolated frame coverage: 11 → 4,521
+Frame coverage rate: 5.4% → 100%
+Blue robots tracked: 0 → 5
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Background Model
+
+Spectator areas and scoreboards in match videos interfere with detection. We initially used manually drawn polygon masks, but those had to be redrawn every time we switched videos. Very tedious.
+
+Temporal Median Automatic Background
+
+Principle: The field and spectator areas are stationary; robots and balls move fast.
+
+1. Uniformly sample 50 frames from the video
+2. Take the median at each pixel position → get a "clean background image"
+3. During analysis: subtract the background from each frame; areas with large differences = foreground (robots and balls)
+4. Set background regions to black; detectors only look at the foreground
+
+Median is robust to outliers. If a robot happens to stop at a location for a few frames, the mean gets skewed, but the median doesn't. Works way better than manually drawn masks.
+
+
+
+
+Currently Unresolved Issues:
+
+HSV Bumper mode is unstable on real match footage; robot tracking still fails
+Shooter attribution rate is extremely low
+Parameter differences across venues are large; automatic adaptation not yet implemented

@@ -286,6 +286,8 @@ def main():
 
     # ── Post-processing ───────────────────────────
     robot_mgr.merge_fragmented_labels()
+    robot_mgr.filter_short_labels()
+    robot_mgr.filter_static_labels()
     robot_mgr.interpolate_positions()
 
     # 用合併+插值後的位置重新收集統計和射球資料

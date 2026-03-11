@@ -65,11 +65,17 @@ VITTRACK_MODEL_PATH = "models/object_tracking_vittrack_2023sep.onnx"
 VITTRACK_SCORE_THRESHOLD = 0.3
 
 # ── 機器人偵測模式 ──────────────────────────────────
-ROBOT_DETECTION_MODE = "HSV"        # "HSV"（HSV Bumper，預設）或 "YOLO"（需 ONNX 模型）
+ROBOT_DETECTION_MODE = "YOLO"       # "HSV" / "YOLO" / "GEMINI"（Gemini API 零樣本偵測）
+
+# ── Gemini API 機器人偵測 ─────────────────────────────
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"  # 速度優先（~3s/張）
+GEMINI_DETECT_STRATEGY = "adaptive"  # every_2 | every_n | adaptive | first_only
+GEMINI_DETECT_INTERVAL = 10         # every_n 模式的間隔幀數
+GEMINI_MAX_IMAGE_SIZE = 1280        # 送 API 的最大影像邊長（縮小省流量）
 
 # ── 機器人 YOLO 偵測（備選模式）──────────────────────
 ROBOT_DETECTION_MODEL_PATH = "models/frc_robot.onnx"
-ROBOT_DETECTION_CONFIDENCE = 0.10   # 低閾值捕捉 Blue 機器人（多數 conf=0.10-0.19）
+ROBOT_DETECTION_CONFIDENCE = 0.27   # 實測調整（0.18 仍有少量誤偵測）
 ROBOT_DETECTION_NMS_IOU = 0.6       # 提高以保留靠近機器人的獨立偵測（0.45→0.6）
 
 # ── HSV Bumper 偵測（無需訓練資料的機器人偵測）──────────
@@ -85,7 +91,7 @@ BUMPER_BLUE_HIGH = (130, 255, 255)
 BUMPER_MIN_AREA = 300       # 太小 = 噪點（4K 下 bumper 最小約 500px²）
 BUMPER_MAX_AREA = 80000     # 太大 = 誤偵測（4K 下 bumper 最大約 50000px²）
 # 長寬比過濾（bumper 是扁長方形）
-BUMPER_MIN_ASPECT = 1.2     # 最小長寬比（寬/高），bumper 通常 > 1.5
+BUMPER_MIN_ASPECT = 0.5     # 最小長寬比（寬/高），允許直立視角的 bumper
 BUMPER_MAX_ASPECT = 12.0    # 最大長寬比，避免偵測到長條噪點
 # NMS IoU（合併重疊偵測）
 BUMPER_NMS_IOU = 0.4
@@ -104,6 +110,8 @@ MOT_REID_MAX_DIST = 400            # 重新辨識基準距離（像素，會依�
 MOT_HISTOGRAM_WEIGHT = 0.4         # 顏色直方圖 Re-ID 權重（0=純距離, 1=全靠外觀）
 MOT_REID_MAX_SECONDS = 5           # 重新辨識最大時間窗口（秒，從 3s 提高到 5s）
 MOT_MIN_TRACK_FRAMES = 15          # 最少偵測幀數（少於此值的 label 在後處理中被移除，60fps 下 15 幀 ≈ 0.25 秒）
+MOT_STATIC_MAX_VARIANCE = 100      # 靜止判定：位置變異數閾值（px²，標準差 <10px 視為靜止）
+MOT_STATIC_MIN_FRAMES = 60         # 靜止判定：至少追蹤 N 幀才判定（60fps 下 1 秒，避免誤判短暫停留）
 MOT_MERGE_MAX_OVERLAP = 15         # 合併最大重疊幀數（60fps 下 ≈ 250ms）
 MOT_MERGE_BOUNDARY_DIST = 800      # 合併邊界距離閾值（像素）
 MOT_MERGE_SEARCH_WINDOW = 180      # 合併邊界搜尋窗口（幀數，60fps 下 ≈ 3 秒）

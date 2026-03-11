@@ -19,6 +19,7 @@ from config import (
     MOT_DETECT_INTERVAL, MOT_REID_MAX_DIST, MOT_HISTOGRAM_WEIGHT,
     MOT_REID_MAX_SECONDS, MOT_MIN_TRACK_FRAMES,
     MOT_MERGE_MAX_OVERLAP, MOT_MERGE_BOUNDARY_DIST, MOT_MERGE_SEARCH_WINDOW,
+    MOT_STATIC_MAX_VARIANCE, MOT_STATIC_MIN_FRAMES,
 )
 from geometry import rect_center
 
@@ -267,10 +268,13 @@ class _MOTTracker:
             if di in det_label_map:
                 label = det_label_map[di]
             else:
-                # 全新機器人
-                alliance = (self._detector.infer_alliance(cls_id)
-                            if cls_id >= 0 else "")
-                label = self._allocate_label(alliance)
+                # 全新機器人 — 先嘗試匹配用戶標記
+                label = self._consume_pending_marker(
+                    cx, cy, cls_id, frame_idx)
+                if not label:
+                    alliance = (self._detector.infer_alliance(cls_id)
+                                if cls_id >= 0 else "")
+                    label = self._allocate_label(alliance)
                 if frame_idx < 5 or frame_idx % 100 == 0:
                     print(f"[INFO] MOT new: {label} (f{frame_idx})")
 
@@ -373,6 +377,42 @@ class _MOTTracker:
         self._positions.setdefault(label, [])
         self._bboxes.setdefault(label, [])
         return label
+
+    def _consume_pending_marker(self, cx: float, cy: float,
+                                cls_id: int, frame_idx: int,
+                                max_dist: float = 200.0) -> str | None:
+        """嘗試將新偵測與用戶標記匹配（距離式）。
+
+        如果偵測中心靠近某個待匹配的標記位置，消費該標記並返回其 label。
+        """
+        if not self._pending_markers:
+            return None
+
+        best_idx = -1
+        best_dist = max_dist
+        for i, (label, alliance, bbox_xywh, mark_frame) in enumerate(
+                self._pending_markers):
+            # 只在標記幀附近匹配（±30 幀容錯）
+            if abs(frame_idx - mark_frame) > 30:
+                continue
+            mx, my, mw, mh = bbox_xywh
+            mcx = mx + mw / 2
+            mcy = my + mh / 2
+            dist = math.hypot(cx - mcx, cy - mcy)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        if best_idx >= 0:
+            label, alliance, _, mark_frame = self._pending_markers.pop(best_idx)
+            self._robot_info[label] = {
+                "alliance": alliance, "mark_frame": mark_frame}
+            self._positions.setdefault(label, [])
+            self._bboxes.setdefault(label, [])
+            print(f"[INFO] 標記匹配: {label} ← 距離 {best_dist:.0f}px "
+                  f"(幀 {frame_idx})")
+            return label
+        return None
 
     def _try_reid(self, cx: float, cy: float, class_id: int,
                   frame_idx: int, lost_labels: set) -> str | None:
@@ -792,6 +832,43 @@ class _MOTTracker:
             print(f"[INFO] MOT filter: 保留 {len(remaining)} 個 label: "
                   f"{', '.join(remaining)}")
 
+    def filter_static_labels(self,
+                             max_variance: float = MOT_STATIC_MAX_VARIANCE,
+                             min_frames: int = MOT_STATIC_MIN_FRAMES):
+        """移除位置幾乎不動的 label（場地元素如 trench/hub 過濾）。
+
+        靜止判定：追蹤幀數 >= min_frames 且位置變異數 < max_variance。
+        """
+        to_remove = []
+        for label, pos_list in self._positions.items():
+            if len(pos_list) < min_frames:
+                continue  # 太短的軌跡由 filter_short_labels 處理
+            xs = [p[1] for p in pos_list]  # (frame, cx, cy)
+            ys = [p[2] for p in pos_list]
+            var_x = np.var(xs)
+            var_y = np.var(ys)
+            total_var = var_x + var_y
+            if total_var < max_variance:
+                to_remove.append((label, len(pos_list), total_var))
+
+        for label, count, var in to_remove:
+            self._positions.pop(label, None)
+            self._bboxes.pop(label, None)
+            self._robot_info.pop(label, None)
+            self._last_known.pop(label, None)
+            for f in list(self._frame_positions.keys()):
+                self._frame_positions[f].pop(label, None)
+            for f in list(self._frame_bboxes.keys()):
+                self._frame_bboxes[f].pop(label, None)
+
+        if to_remove:
+            removed_names = [f"{l}({c}f, var={v:.1f})" for l, c, v in to_remove]
+            print(f"[INFO] MOT static filter: 移除 {len(to_remove)} 個靜止 label "
+                  f"(var < {max_variance}): {', '.join(removed_names)}")
+            remaining = list(self._robot_info.keys())
+            print(f"[INFO] MOT static filter: 保留 {len(remaining)} 個 label: "
+                  f"{', '.join(remaining)}")
+
     def clear(self):
         self._label_map.clear()
         self._pending_markers.clear()
@@ -1141,6 +1218,11 @@ class RobotTrackerManager:
             self._impl.filter_short_labels(
                 min_frames if min_frames is not None
                 else MOT_MIN_TRACK_FRAMES)
+
+    def filter_static_labels(self):
+        """移除位置幾乎不動的 label（場地元素過濾，MOT 模式專用）。"""
+        if hasattr(self._impl, 'filter_static_labels'):
+            self._impl.filter_static_labels()
 
     def interpolate_positions(self):
         """對丟失幀做位置插值（MOT 模式專用）。"""

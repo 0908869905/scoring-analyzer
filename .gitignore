@@ -34,6 +34,29 @@ train_colab.ipynb
 # Browser automation
 .playwright-mcp/
 
+# Video & media
+*.mp4
+*.mp4.part
+*.mov
+*.avi
+*.mkv
+
+# Test/debug images
+debug_*.jpg
+test*.jpg
+1.jpg
+2.jpg
+3.jpg
+
+# Screenshots
+螢幕擷取畫面*.png
+
+# Raw labels (not reviewed)
+labels_raw/
+
+# Research
+research/
+
 # OS
 Thumbs.db
 Desktop.ini

@@ -6,6 +6,7 @@ import csv
 import math
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, simpledialog
 from pathlib import Path
@@ -104,6 +105,15 @@ class ScoringAnalyzer(ctk.CTk):
 
         # Debug 4 面板視圖
         self._debug_view = False
+
+        # 縮放/平移
+        self._zoom_level = 1.0
+        self._pan_x = 0.0   # 平移偏移（影片像素）
+        self._pan_y = 0.0
+        self._crop_x = 0    # 目前裁切原點（影片像素）
+        self._crop_y = 0
+        self._pan_drag_start = None   # (canvas_x, canvas_y)
+        self._pan_drag_origin = None  # (pan_x, pan_y)
 
         # 機器人追蹤
         self.robot_manager = RobotTrackerManager()
@@ -235,6 +245,9 @@ class ScoringAnalyzer(ctk.CTk):
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
         self.canvas.bind("<ButtonPress-3>", self._on_canvas_right_click)
+        self.canvas.bind("<Control-MouseWheel>", self._on_zoom)
+        self.canvas.bind("<B3-Motion>", self._on_pan_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
 
         # 播放控制列
         playback = ctk.CTkFrame(tab_video, fg_color=COLORS["bg_secondary"],
@@ -356,14 +369,23 @@ class ScoringAnalyzer(ctk.CTk):
                                      corner_radius=8)
         toolbar_row2.pack(fill=tk.X, pady=(2, 0))
 
-        self.analyze_btn = ctk.CTkButton(
-            toolbar_row2, text="開始分析", height=32, corner_radius=8,
+        self.analyze_quick_btn = ctk.CTkButton(
+            toolbar_row2, text="分析 25 秒", height=32, corner_radius=8,
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_primary"],
             font=ctk.CTkFont(family="Microsoft JhengHei UI",
                               size=13, weight="bold"),
-            command=self._on_analyze)
-        self.analyze_btn.pack(side=tk.LEFT, padx=(8, 4), pady=4)
+            command=lambda: self._on_analyze(max_seconds=25))
+        self.analyze_quick_btn.pack(side=tk.LEFT, padx=(8, 2), pady=4)
+
+        self.analyze_full_btn = ctk.CTkButton(
+            toolbar_row2, text="完整分析", height=32, corner_radius=8,
+            fg_color="#8e44ad", hover_color="#7d3c98",
+            text_color="white",
+            font=ctk.CTkFont(family="Microsoft JhengHei UI",
+                              size=13, weight="bold"),
+            command=lambda: self._on_analyze(max_seconds=None))
+        self.analyze_full_btn.pack(side=tk.LEFT, padx=(2, 4), pady=4)
 
         self.crop_btn = ctk.CTkButton(
             toolbar_row2, text="裁切畫面", height=30, corner_radius=8,
@@ -510,23 +532,160 @@ class ScoringAnalyzer(ctk.CTk):
         self.bind("<Control-o>", lambda e: self._on_open_video())
         self.bind("<Escape>", lambda e: self._cancel_interaction())
         self.bind("<F3>", lambda e: self._toggle_debug_view())
+        self.bind("<Home>", lambda e: self._reset_zoom())
 
     # ══════════════════════════════════════════════════════
     # 座標轉換
     # ══════════════════════════════════════════════════════
 
     def _canvas_to_video(self, cx, cy):
-        vx = (cx - self._display_offset_x) / self._display_scale
-        vy = (cy - self._display_offset_y) / self._display_scale
+        vx = (cx - self._display_offset_x) / self._display_scale + self._crop_x
+        vy = (cy - self._display_offset_y) / self._display_scale + self._crop_y
         return (vx, vy)
 
     def _video_to_canvas(self, vx, vy):
-        cx = vx * self._display_scale + self._display_offset_x
-        cy = vy * self._display_scale + self._display_offset_y
+        cx = (vx - self._crop_x) * self._display_scale + self._display_offset_x
+        cy = (vy - self._crop_y) * self._display_scale + self._display_offset_y
         return (cx, cy)
 
     def _video_to_resized(self, point, scale):
-        return (int(point[0] * scale), int(point[1] * scale))
+        return (int((point[0] - self._crop_x) * scale),
+                int((point[1] - self._crop_y) * scale))
+
+    # ══════════════════════════════════════════════════════
+    # 縮放/平移
+    # ══════════════════════════════════════════════════════
+
+    def _apply_zoom_crop(self, frame, cw, ch):
+        """依據縮放/平移裁切 frame 到可見區域。設定 _crop_x/_crop_y。"""
+        self._crop_x = 0
+        self._crop_y = 0
+        if self._zoom_level <= 1.0:
+            return frame
+
+        fh, fw = frame.shape[:2]
+        base_scale = min(cw / fw, ch / fh)
+        eff_scale = base_scale * self._zoom_level
+
+        # 可見區域（影片像素）
+        view_w = cw / eff_scale
+        view_h = ch / eff_scale
+
+        # 視點中心
+        cx = fw / 2 + self._pan_x
+        cy = fh / 2 + self._pan_y
+
+        x1 = max(0, int(cx - view_w / 2))
+        y1 = max(0, int(cy - view_h / 2))
+        x2 = min(fw, int(cx + view_w / 2 + 0.5))
+        y2 = min(fh, int(cy + view_h / 2 + 0.5))
+
+        if x2 - x1 < 10 or y2 - y1 < 10:
+            return frame
+
+        self._crop_x = x1
+        self._crop_y = y1
+        return frame[y1:y2, x1:x2]
+
+    def _on_zoom(self, event):
+        """Ctrl+滾輪 縮放（向游標位置縮放）。"""
+        if not self.cap:
+            return
+
+        # 縮放前：游標下的影片座標
+        old_vx, old_vy = self._canvas_to_video(event.x, event.y)
+
+        if event.delta > 0:
+            new_zoom = min(self._zoom_level * 1.25, 8.0)
+        else:
+            new_zoom = max(self._zoom_level / 1.25, 1.0)
+
+        if new_zoom <= 1.0:
+            self._zoom_level = 1.0
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+        else:
+            # 計算新 pan 使游標下的影片座標不變
+            fw = self.video_width
+            fh = self.video_height
+            if self._roi:
+                _, _, fw, fh = self._roi
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                cw, ch = 900, 600
+            base_scale = min(cw / fw, ch / fh)
+            new_eff = base_scale * new_zoom
+
+            self._zoom_level = new_zoom
+            self._pan_x = old_vx - fw / 2 - (event.x - cw / 2) / new_eff
+            self._pan_y = old_vy - fh / 2 - (event.y - ch / 2) / new_eff
+            self._clamp_pan()
+
+        self._show_frame(self.current_frame)
+
+    def _on_pan_drag(self, event):
+        """Shift+右鍵拖曳平移。"""
+        if not self._pan_drag_start:
+            return
+        dx = event.x - self._pan_drag_start[0]
+        dy = event.y - self._pan_drag_start[1]
+
+        fw = self.video_width
+        fh = self.video_height
+        if self._roi:
+            _, _, fw, fh = self._roi
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            cw, ch = 900, 600
+        base_scale = min(cw / fw, ch / fh)
+        eff_scale = base_scale * self._zoom_level
+
+        self._pan_x = self._pan_drag_origin[0] - dx / eff_scale
+        self._pan_y = self._pan_drag_origin[1] - dy / eff_scale
+        self._clamp_pan()
+        self._show_frame(self.current_frame)
+
+    def _on_pan_end(self, event):
+        """右鍵放開結束平移。"""
+        if self._pan_drag_start:
+            self._pan_drag_start = None
+            self._pan_drag_origin = None
+            self.canvas.config(cursor="")
+
+    def _clamp_pan(self):
+        """限制平移範圍，避免超出影片邊界。"""
+        if self._zoom_level <= 1.0:
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            return
+        fw = self.video_width
+        fh = self.video_height
+        if self._roi:
+            _, _, fw, fh = self._roi
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            cw, ch = 900, 600
+        base_scale = min(cw / fw, ch / fh)
+        eff_scale = base_scale * self._zoom_level
+
+        view_w = cw / eff_scale
+        view_h = ch / eff_scale
+        max_px = max(0, (fw - view_w) / 2)
+        max_py = max(0, (fh - view_h) / 2)
+        self._pan_x = max(-max_px, min(max_px, self._pan_x))
+        self._pan_y = max(-max_py, min(max_py, self._pan_y))
+
+    def _reset_zoom(self):
+        """重設縮放（Home 鍵）。"""
+        if self._zoom_level != 1.0:
+            self._zoom_level = 1.0
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            if self.cap:
+                self._show_frame(self.current_frame)
 
     # ══════════════════════════════════════════════════════
     # 影片操作
@@ -563,6 +722,9 @@ class ScoringAnalyzer(ctk.CTk):
         self._original_video_width = self.video_width
         self._original_video_height = self.video_height
         self._roi = None
+        self._zoom_level = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
 
         # 快取第一幀
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -630,6 +792,9 @@ class ScoringAnalyzer(ctk.CTk):
                          f"{time_sec:.3f}s  [DEBUG]")
                 self.slider.set(frame_idx)
                 return
+
+        # 縮放裁切
+        frame = self._apply_zoom_crop(frame, cw, ch)
 
         fh, fw = frame.shape[:2]
         scale = min(cw / fw, ch / fh)
@@ -815,6 +980,9 @@ class ScoringAnalyzer(ctk.CTk):
                          f"{time_sec:.3f}s  [DEBUG]")
                 self.slider.set(frame_idx)
                 return
+
+        # 縮放裁切
+        frame = self._apply_zoom_crop(frame, cw, ch)
 
         fh, fw = frame.shape[:2]
         scale = min(cw / fw, ch / fh)
@@ -1237,34 +1405,29 @@ class ScoringAnalyzer(ctk.CTk):
 
         t_start = time.monotonic()
 
-        # 根據牆鐘時間計算目標幀
-        elapsed = t_start - self._play_wall_start
-        target = self._play_start_frame + int(
-            elapsed * self.fps * self._playback_speed)
-        target = min(target, self.total_frames - 1)
+        # 固定步進：每 tick 前進 (fps/30 * speed) 幀
+        # 渲染慢時自動降速，不會卡頓
+        step = max(1, round(self.fps / 30.0 * self._playback_speed))
+        target = min(self.current_frame + step, self.total_frames - 1)
+        gap = target - self.current_frame
 
-        if target > self.current_frame:
-            gap = target - self.current_frame
-            if gap == 1:
-                # 下一幀：直接讀取
-                ret, frame = self.cap.read()
-            elif gap <= 5:
-                # 小間距：grab 跳過中間幀，只讀最後一幀
-                for _ in range(gap - 1):
-                    self.cap.grab()
-                ret, frame = self.cap.read()
-            else:
-                # 大間距：直接 seek（避免逐幀 grab 太慢）
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-                ret, frame = self.cap.read()
+        if gap == 1:
+            ret, frame = self.cap.read()
+        elif gap <= 5:
+            for _ in range(gap - 1):
+                self.cap.grab()
+            ret, frame = self.cap.read()
+        else:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+            ret, frame = self.cap.read()
 
-            if ret and frame is not None:
-                self.current_frame = target
-                self._render_frame_playback(frame, target)
+        if ret and frame is not None:
+            self.current_frame = target
+            self._render_frame_playback(frame, target)
 
-        # 固定 ~30fps 顯示率，扣除本次渲染耗時
+        # 扣除渲染耗時，保持穩定節奏
         render_ms = (time.monotonic() - t_start) * 1000
-        delay = max(1, int(33 - render_ms))
+        delay = max(10, int(33 - render_ms))
         self.after(delay, self._play_loop)
 
     # ══════════════════════════════════════════════════════
@@ -1509,6 +1672,13 @@ class ScoringAnalyzer(ctk.CTk):
 
     def _on_canvas_right_click(self, event):
         """右鍵完成多邊形標記 / bumper 取色完成 / HSV 取色完成。"""
+        # Shift+右鍵：啟動拖曳平移
+        if event.state & 0x1 and self._zoom_level > 1.0:
+            self._pan_drag_start = (event.x, event.y)
+            self._pan_drag_origin = (self._pan_x, self._pan_y)
+            self.canvas.config(cursor="fleur")
+            return
+
         if self.interaction_mode == "bumper_pick":
             self._finish_bumper_pick()
             return
@@ -1741,7 +1911,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._runtime_config.detection_mode = value
         self._ai_model = None  # 重置，分析時再載入
 
-    def _on_analyze(self):
+    def _on_analyze(self, max_seconds=None):
         if not self.cap:
             self._set_status("請先開啟影片", COLORS["error"])
             return
@@ -1752,15 +1922,23 @@ class ScoringAnalyzer(ctk.CTk):
             self._set_status("分析進行中...", COLORS["accent"])
             return
 
+        # 計算最大幀數
+        if max_seconds is not None:
+            self._analysis_max_frames = int(max_seconds * self.fps)
+        else:
+            self._analysis_max_frames = None
+
         # 從 RuntimeConfig 讀取 auto 時間設定
         self.auto_duration = self._runtime_config.auto_duration_sec
 
         self._clear_analysis()
         self._analyzing = True
-        self.analyze_btn.configure(state="disabled")
+        self.analyze_quick_btn.configure(state="disabled")
+        self.analyze_full_btn.configure(state="disabled")
         self.progress_bar.pack(fill=tk.X, padx=12, pady=(0, 6))
         self.progress_bar.set(0)
-        self._set_status("分析中...", COLORS["info"])
+        label = f"分析中（前 {max_seconds} 秒）..." if max_seconds else "分析中（完整影片）..."
+        self._set_status(label, COLORS["info"])
 
         thread = threading.Thread(target=self._run_analysis, daemon=True)
         thread.start()
@@ -1788,9 +1966,21 @@ class ScoringAnalyzer(ctk.CTk):
                 self.after(0, lambda em=err_msg: self._set_status(
                     f"球偵測 AI 載入失敗: {em[:60]}，改用 HSV", COLORS["error"]))
 
-        # 機器人偵測器載入（預設 HSV Bumper，可選 YOLO）
+        # 機器人偵測器載入（HSV / YOLO / GEMINI）
         robot_detector = None
-        if ROBOT_DETECTION_MODE == "YOLO":
+        if ROBOT_DETECTION_MODE == "GEMINI":
+            try:
+                from robot_detection import RobotDetectorGemini
+                robot_detector = RobotDetectorGemini()
+                self.after(0, lambda: self._set_status(
+                    "機器人偵測: Gemini API（零樣本）", COLORS["info"]))
+            except Exception as e:
+                print(f"[WARN] Gemini 偵測器初始化失敗，回退 HSV Bumper: {e}")
+                robot_detector = BumperDetectorHSV()
+                self.after(0, lambda em=str(e)[:40]: self._set_status(
+                    f"機器人偵測: HSV Bumper（Gemini 失敗: {em}）",
+                    COLORS["error"]))
+        elif ROBOT_DETECTION_MODE == "YOLO":
             try:
                 robot_detector = load_robot_model()
                 self.after(0, lambda: self._set_status(
@@ -1821,10 +2011,10 @@ class ScoringAnalyzer(ctk.CTk):
         tracking_mode = "MOT" if robot_mgr.use_mot else "SOT"
         print(f"[INFO] 追蹤模式: {tracking_mode}")
 
-        # MOT 自動模式：無取色模板且未標記機器人時，自動偵測
-        if not self._bumper_templates and not self._robot_markers and robot_mgr.use_mot:
+        # MOT 永遠使用距離匹配（ByteTrack IoU 在 FRC 場景失效）
+        if robot_mgr.use_mot:
             robot_mgr.enable_auto_mode()
-            print("[INFO] MOT 自動模式: 未標記機器人，將自動偵測所有機器人")
+            print("[INFO] MOT 距離匹配模式（自動偵測所有機器人）")
 
         # 初始化進球引擎
         engine = ScoringEngine(
@@ -1842,6 +2032,8 @@ class ScoringAnalyzer(ctk.CTk):
         engine.hp_lines = list(self._hp_lines)
 
         total = self.total_frames
+        if self._analysis_max_frames is not None:
+            total = min(total, self._analysis_max_frames)
         frame_detections = {}
         robot_positions_cache = {}
         robot_bboxes_cache = {}
@@ -1894,7 +2086,8 @@ class ScoringAnalyzer(ctk.CTk):
         bg_model.build(cap, roi=roi, sample_count=cfg.bg_sample_count)
         self._bg_model = bg_model
 
-        # 逐幀處理
+        # 逐幀處理（球偵測 CPU + 機器人偵測 GPU 並行）
+        pool = ThreadPoolExecutor(max_workers=2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         for frame_idx in range(total):
             ret, frame = cap.read()
@@ -1906,9 +2099,9 @@ class ScoringAnalyzer(ctk.CTk):
                 rx, ry, rw, rh = roi
                 frame = frame[ry:ry+rh, rx:rx+rw]
 
-            # 背景模型前景遮罩：將背景像素設黑（減少假陽性偵測）
+            # 背景模型前景遮罩：只用於球偵測（機器人偵測用原始 frame）
             fg_mask = bg_model.get_foreground_mask(frame)
-            frame = cv2.bitwise_and(frame, frame, mask=fg_mask)
+            frame_masked = cv2.bitwise_and(frame, frame, mask=fg_mask)
 
             # SOT 模式：在標記幀初始化追蹤器（需要影像）
             if not robot_mgr.use_mot and frame_idx in markers_by_frame:
@@ -1916,14 +2109,17 @@ class ScoringAnalyzer(ctk.CTk):
                     robot_mgr.add_robot(
                         label, (x, y, w, h), frame, frame_idx, alliance)
 
-            # 球偵測+追蹤
-            dets = detect_balls(frame)
+            # 球偵測 (CPU) + 機器人偵測 (GPU) 並行
+            ball_future = pool.submit(detect_balls, frame_masked)
+            robot_future = pool.submit(
+                robot_mgr.update_all, frame, frame_idx)
+            dets = ball_future.result()
+            robot_future.result()
+
             frame_detections[frame_idx] = dets
             total_ball_dets += len(dets)
             ball_positions = ball_tracker.update(dets, frame_idx)
 
-            # 機器人追蹤
-            robot_mgr.update_all(frame, frame_idx)
             robot_pos = robot_mgr.get_all_positions(frame_idx)
             total_robot_dets += len(robot_pos)
             robot_positions_cache[frame_idx] = \
@@ -1947,6 +2143,7 @@ class ScoringAnalyzer(ctk.CTk):
                 self.after(0, lambda p=pct, f=frame_idx, m=mode_label:
                            self._update_progress(p, f, m))
 
+        pool.shutdown(wait=False)
         cap.release()
 
         print(f"[INFO] 分析完成: 共 {total} 幀, "
@@ -1961,6 +2158,7 @@ class ScoringAnalyzer(ctk.CTk):
 
         robot_mgr.merge_fragmented_labels()
         robot_mgr.filter_short_labels()
+        robot_mgr.filter_static_labels()
         robot_mgr.interpolate_positions()
         # 更新插值後的位置快取
         if robot_mgr.use_mot:
@@ -2024,7 +2222,8 @@ class ScoringAnalyzer(ctk.CTk):
 
     def _analysis_error(self, msg):
         self._analyzing = False
-        self.analyze_btn.configure(state="normal")
+        self.analyze_quick_btn.configure(state="normal")
+        self.analyze_full_btn.configure(state="normal")
         self.progress_bar.pack_forget()
         self._set_status(f"分析錯誤: {msg}", COLORS["error"])
 
@@ -2041,7 +2240,8 @@ class ScoringAnalyzer(ctk.CTk):
         self._analysis_done = True
         self._analyzing = False
 
-        self.analyze_btn.configure(state="normal")
+        self.analyze_quick_btn.configure(state="normal")
+        self.analyze_full_btn.configure(state="normal")
         self.progress_bar.pack_forget()
 
         # 添加自動偵測的機器人到標記列表（用於顯示和統計）
