@@ -10,9 +10,9 @@ from config import (
     SCORE_ZONE_DWELL_FRAMES, SCORE_COOLDOWN_FRAMES,
     AUTO_DURATION_SEC, TELEOP_START_SEC,
     SHOT_MIN_VELOCITY, SHOT_MIN_UPWARD_VELOCITY, SHOT_ROBOT_PROXIMITY,
-    HP_ATTRIBUTION_DIST, BALL_OWNERSHIP_DIST,
+    BALL_OWNERSHIP_DIST,
 )
-from geometry import point_in_polygon, point_to_segment_distance, distance
+from geometry import point_in_polygon, segments_intersect, distance
 
 
 @dataclass
@@ -111,7 +111,6 @@ class ScoringEngine:
                  shot_min_velocity=SHOT_MIN_VELOCITY,
                  shot_min_upward_velocity=SHOT_MIN_UPWARD_VELOCITY,
                  shot_robot_proximity=SHOT_ROBOT_PROXIMITY,
-                 hp_attribution_dist=HP_ATTRIBUTION_DIST,
                  ball_ownership_dist=BALL_OWNERSHIP_DIST):
         self.fps = fps
         self.auto_end_frame = int(auto_sec * fps)
@@ -123,7 +122,6 @@ class ScoringEngine:
         self._shot_min_velocity = shot_min_velocity
         self._shot_min_upward_velocity = shot_min_upward_velocity
         self._shot_robot_proximity = shot_robot_proximity
-        self._hp_attribution_dist = hp_attribution_dist
         self._ownership_dist = ball_ownership_dist
 
         self.zones = []          # List[ScoringZone]
@@ -613,7 +611,7 @@ class ScoringEngine:
               f"Proximity:{proximity_used}")
 
     def _check_hp_attribution(self, relevant_points, zone_alliance):
-        """檢查球軌跡是否經過 HP 線段附近，回傳 HP label 或 None。"""
+        """檢查球軌跡是否穿過 HP 線段（線段交叉判定），回傳 HP label 或 None。"""
         if not self.hp_lines:
             return None
         for hp in self.hp_lines:
@@ -621,11 +619,11 @@ class ScoringEngine:
             if hp["alliance"] and zone_alliance and \
                     hp["alliance"] != zone_alliance:
                 continue
-            x1, y1 = hp["p1"]
-            x2, y2 = hp["p2"]
-            for _, bx, by in relevant_points:
-                d = point_to_segment_distance(bx, by, x1, y1, x2, y2)
-                if d <= self._hp_attribution_dist:
+            p3, p4 = hp["p1"], hp["p2"]
+            for i in range(1, len(relevant_points)):
+                p1 = (relevant_points[i - 1][1], relevant_points[i - 1][2])
+                p2 = (relevant_points[i][1], relevant_points[i][2])
+                if segments_intersect(p1, p2, p3, p4):
                     return hp["name"]
         return None
 

@@ -23,7 +23,9 @@ class SettingsPanel(ctk.CTkFrame):
     def __init__(self, master, config: RuntimeConfig,
                  get_current_frame=None,
                  on_config_changed=None,
-                 start_color_pick=None):
+                 start_color_pick=None,
+                 get_analysis_data=None,
+                 on_recompute_attribution=None):
         """
         Args:
             master: 父 widget（tabview 的 tab frame）
@@ -31,17 +33,25 @@ class SettingsPanel(ctk.CTkFrame):
             get_current_frame: callback，回傳當前影片幀 (BGR np.ndarray) 或 None
             on_config_changed: callback，設定變更時呼叫
             start_color_pick: callback(mode, callback, finish_callback)，啟動取色模式
+            get_analysis_data: callback，回傳當前幀分析資料 dict 或 None
+            on_recompute_attribution: callback，重新計算歸因
         """
         super().__init__(master, fg_color="transparent")
         self.cfg = config
         self._get_frame = get_current_frame
         self._on_changed = on_config_changed
         self._start_color_pick_fn = start_color_pick
+        self._get_analysis_data = get_analysis_data
+        self._on_recompute = on_recompute_attribution
 
         # 即時預覽用
         self._preview_photo = None
         self._mask_photo = None
         self._preview_after_id = None
+        self._ownership_preview_after_id = None
+        self._shot_preview_after_id = None
+        self._ownership_photo = None
+        self._shot_photo = None
 
         # 所有 slider 追蹤：key -> (slider, val_label, is_float, float_scale)
         self._all_sliders: dict = {}
@@ -211,24 +221,96 @@ class SettingsPanel(ctk.CTkFrame):
                           is_float=True, float_scale=100)
 
     def _build_scoring_tab(self):
-        """進球判定 Tab。"""
+        """進球判定 Tab — 上方 slider + 下方即時預覽。"""
         tab = self._tabview.add("進球")
-        frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        frame.pack(fill=tk.BOTH, expand=True)
+        tab.rowconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=0)
+        tab.columnconfigure(0, weight=1)
 
-        self._add_slider(frame, "score_proximity_frames", "射手回溯幀數", 1, 60)
-        self._add_slider(frame, "score_max_shooter_dist", "射手最大距離", 50, 1000)
-        self._add_slider(frame, "score_zone_dwell_frames", "區域停留幀數", 1, 30)
-        self._add_slider(frame, "score_cooldown_frames", "進球冷卻幀數", 1, 60)
+        # 上方：Sliders（可滾動）
+        slider_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        slider_frame.grid(row=0, column=0, sticky="nsew")
+
+        self._add_slider(slider_frame, "score_proximity_frames",
+                         "射手回溯幀數", 1, 60, self._on_scoring_changed)
+        self._add_slider(slider_frame, "score_max_shooter_dist",
+                         "射手最大距離", 50, 1000, self._on_scoring_changed)
+        self._add_slider(slider_frame, "score_zone_dwell_frames",
+                         "區域停留幀數", 1, 30, self._on_scoring_changed)
+        self._add_slider(slider_frame, "score_cooldown_frames",
+                         "進球冷卻幀數", 1, 60, self._on_scoring_changed)
+        self._add_slider(slider_frame, "ball_ownership_dist",
+                         "球所有權距離", 50, 500, self._on_scoring_changed)
+
+        # 重新計算按鈕
+        ctk.CTkButton(
+            slider_frame, text="重新計算歸因", height=28, corner_radius=6,
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color="white",
+            font=ctk.CTkFont(size=11),
+            command=self._recompute_attribution
+        ).pack(fill=tk.X, pady=(8, 2))
+
+        # 下方：預覽區域（固定高度）
+        preview_frame = ctk.CTkFrame(tab, fg_color="transparent", height=160)
+        preview_frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        preview_frame.grid_propagate(False)
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+
+        self._ownership_canvas = tk.Canvas(
+            preview_frame, bg="black", highlightthickness=0, bd=0)
+        self._ownership_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self._ownership_label = ctk.CTkLabel(
+            preview_frame, text="所有權: --",
+            text_color=COLORS["accent"],
+            font=ctk.CTkFont(size=11, weight="bold"))
+        self._ownership_label.grid(row=1, column=0, pady=(2, 0))
 
     def _build_shot_tab(self):
-        """出手偵測 Tab。"""
+        """出手偵測 Tab — 上方 slider + 下方即時預覽。"""
         tab = self._tabview.add("出手")
-        frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        frame.pack(fill=tk.BOTH, expand=True)
+        tab.rowconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=0)
+        tab.columnconfigure(0, weight=1)
 
-        self._add_slider(frame, "shot_min_velocity", "最低速度 (px/幀)", 1, 100)
-        self._add_slider(frame, "shot_robot_proximity", "機器人距離 (px)", 50, 500)
+        # 上方：Sliders（可滾動）
+        slider_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        slider_frame.grid(row=0, column=0, sticky="nsew")
+
+        self._add_slider(slider_frame, "shot_min_velocity",
+                         "最低速度 (px/幀)", 1, 100, self._on_shot_changed)
+        self._add_slider(slider_frame, "shot_robot_proximity",
+                         "機器人距離 (px)", 50, 500, self._on_shot_changed)
+        self._add_slider(slider_frame, "shot_min_upward_velocity",
+                         "最低上升速度", 1, 30, self._on_shot_changed)
+
+        # 重新計算按鈕
+        ctk.CTkButton(
+            slider_frame, text="重新計算歸因", height=28, corner_radius=6,
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color="white",
+            font=ctk.CTkFont(size=11),
+            command=self._recompute_attribution
+        ).pack(fill=tk.X, pady=(8, 2))
+
+        # 下方：預覽區域（固定高度）
+        preview_frame = ctk.CTkFrame(tab, fg_color="transparent", height=160)
+        preview_frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        preview_frame.grid_propagate(False)
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+
+        self._shot_canvas = tk.Canvas(
+            preview_frame, bg="black", highlightthickness=0, bd=0)
+        self._shot_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self._shot_label = ctk.CTkLabel(
+            preview_frame, text="速度: --",
+            text_color=COLORS["accent"],
+            font=ctk.CTkFont(size=11, weight="bold"))
+        self._shot_label.grid(row=1, column=0, pady=(2, 0))
 
     def _build_robot_tab(self):
         """機器人追蹤 Tab。"""
@@ -467,6 +549,9 @@ class SettingsPanel(ctk.CTkFrame):
         if self._preview_after_id is not None:
             self.after_cancel(self._preview_after_id)
         self._preview_after_id = self.after(100, self._update_preview)
+        # 幀切換時也更新進球/出手預覽
+        self._schedule_ownership_preview()
+        self._schedule_shot_preview()
 
     def _update_preview(self):
         self._preview_after_id = None
@@ -493,7 +578,7 @@ class SettingsPanel(ctk.CTkFrame):
         self._show_on_canvas(self._mask_canvas, mask_colored)
         self._detect_count_label.configure(text=f"偵測: {ball_count} 個球")
 
-    def _show_on_canvas(self, canvas, bgr_image):
+    def _show_on_canvas(self, canvas, bgr_image, store_attr=None):
         cw = canvas.winfo_width()
         ch = canvas.winfo_height()
         if cw < 10 or ch < 10:
@@ -515,7 +600,9 @@ class SettingsPanel(ctk.CTkFrame):
         offset_y = (ch - new_h) // 2
         canvas.create_image(offset_x, offset_y, anchor=tk.NW, image=photo)
 
-        if canvas is self._preview_canvas:
+        if store_attr:
+            setattr(self, store_attr, photo)
+        elif canvas is self._preview_canvas:
             self._preview_photo = photo
         else:
             self._mask_photo = photo
@@ -626,10 +713,205 @@ class SettingsPanel(ctk.CTkFrame):
         self._calibration_points = []
 
     # ══════════════════════════════════════════════════
+    # 進球 / 出手 預覽
+    # ══════════════════════════════════════════════════
+
+    def _on_scoring_changed(self):
+        self._schedule_ownership_preview()
+
+    def _on_shot_changed(self):
+        self._schedule_shot_preview()
+
+    def _schedule_ownership_preview(self):
+        if self._ownership_preview_after_id is not None:
+            self.after_cancel(self._ownership_preview_after_id)
+        self._ownership_preview_after_id = self.after(
+            100, self._update_ownership_preview)
+
+    def _schedule_shot_preview(self):
+        if self._shot_preview_after_id is not None:
+            self.after_cancel(self._shot_preview_after_id)
+        self._shot_preview_after_id = self.after(
+            100, self._update_shot_preview)
+
+    def _update_ownership_preview(self):
+        """球所有權即時預覽 — 顯示 ownership_dist 圓圈和球-機器人連線。"""
+        self._ownership_preview_after_id = None
+        if not self._get_frame:
+            return
+        frame = self._get_frame()
+        if frame is None:
+            return
+
+        preview = frame.copy()
+        h, w = preview.shape[:2]
+        ownership_dist = self.cfg.ball_ownership_dist
+
+        data = self._get_analysis_data() if self._get_analysis_data else None
+        info_text = "請先完成分析"
+
+        if data:
+            robot_pos = data.get("robot_positions", {})
+            ball_dets = data.get("ball_detections", [])
+            ball_ownership = data.get("ball_ownership", {})
+            frame_idx = data.get("frame_idx", 0)
+
+            # 畫機器人 ownership 圓圈
+            for label, pos in robot_pos.items():
+                rx, ry = int(pos[0]), int(pos[1])
+                color = (0, 200, 200)  # 青色
+                cv2.circle(preview, (rx, ry), int(ownership_dist),
+                           color, 1, cv2.LINE_AA)
+                cv2.circle(preview, (rx, ry), 5, color, -1, cv2.LINE_AA)
+                cv2.putText(preview, label, (rx + 8, ry - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            color, 1, cv2.LINE_AA)
+
+            # 畫球到最近機器人的連線
+            closest_info = None
+            for det in ball_dets:
+                bx, by = int(det[0]), int(det[1])
+                cv2.circle(preview, (bx, by), 6, (0, 255, 255), 2,
+                           cv2.LINE_AA)
+
+                best_label = None
+                best_dist = float('inf')
+                best_pos = None
+                for label, pos in robot_pos.items():
+                    d = ((bx - pos[0])**2 + (by - pos[1])**2) ** 0.5
+                    if d < best_dist:
+                        best_dist = d
+                        best_label = label
+                        best_pos = (int(pos[0]), int(pos[1]))
+
+                if best_pos:
+                    in_range = best_dist <= ownership_dist
+                    line_color = (0, 255, 0) if in_range else (0, 0, 255)
+                    cv2.line(preview, (bx, by), best_pos,
+                             line_color, 2, cv2.LINE_AA)
+                    mid_x = (bx + best_pos[0]) // 2
+                    mid_y = (by + best_pos[1]) // 2
+                    cv2.putText(preview, f"{best_dist:.0f}px",
+                                (mid_x, mid_y - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                line_color, 1, cv2.LINE_AA)
+                    if closest_info is None or best_dist < closest_info[1]:
+                        closest_info = (best_label, best_dist, in_range)
+
+            if closest_info:
+                lbl, d, ok = closest_info
+                status = "範圍內" if ok else "超出"
+                info_text = f"所有權: {lbl} (距離: {d:.0f}px, {status})"
+            elif robot_pos:
+                info_text = f"閾值: {ownership_dist}px（無球偵測）"
+            else:
+                info_text = f"閾值: {ownership_dist}px（無機器人）"
+        else:
+            # 無分析資料 — 只畫參數說明
+            cv2.putText(preview, f"ownership_dist = {ownership_dist}px",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 200, 200), 1, cv2.LINE_AA)
+            cv2.circle(preview, (w // 2, h // 2), ownership_dist,
+                       (0, 200, 200), 1, cv2.LINE_AA)
+
+        self._show_on_canvas(self._ownership_canvas, preview,
+                             store_attr="_ownership_photo")
+        self._ownership_label.configure(text=info_text)
+
+    def _update_shot_preview(self):
+        """出手偵測即時預覽 — 顯示 proximity 圓圈和速度箭頭。"""
+        self._shot_preview_after_id = None
+        if not self._get_frame:
+            return
+        frame = self._get_frame()
+        if frame is None:
+            return
+
+        preview = frame.copy()
+        h, w = preview.shape[:2]
+        proximity = self.cfg.shot_robot_proximity
+        min_vel = self.cfg.shot_min_velocity
+        min_upward = self.cfg.shot_min_upward_velocity
+
+        data = self._get_analysis_data() if self._get_analysis_data else None
+        info_text = "請先完成分析"
+
+        if data:
+            robot_pos = data.get("robot_positions", {})
+            trajectories = data.get("trajectories", {})
+            frame_idx = data.get("frame_idx", 0)
+
+            # 畫機器人 proximity 圓圈
+            for label, pos in robot_pos.items():
+                rx, ry = int(pos[0]), int(pos[1])
+                color = (200, 100, 0)  # 橘藍
+                cv2.circle(preview, (rx, ry), int(proximity),
+                           color, 1, cv2.LINE_AA)
+                cv2.circle(preview, (rx, ry), 5, color, -1, cv2.LINE_AA)
+                cv2.putText(preview, label, (rx + 8, ry - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            color, 1, cv2.LINE_AA)
+
+            # 畫球速度箭頭
+            max_vel_shown = 0.0
+            for tid, traj in trajectories.items():
+                traj_sorted = sorted(traj, key=lambda p: p[0])
+                for i in range(1, len(traj_sorted)):
+                    f0, x0, y0, *_ = traj_sorted[i - 1]
+                    f1, x1, y1, *_ = traj_sorted[i]
+                    if not (f0 <= frame_idx <= f1):
+                        continue
+                    dt = f1 - f0
+                    if dt <= 0:
+                        continue
+                    vx = (x1 - x0) / dt
+                    vy = (y1 - y0) / dt
+                    vel = (vx**2 + vy**2) ** 0.5
+                    max_vel_shown = max(max_vel_shown, vel)
+
+                    bx, by = int(x0), int(y0)
+                    # 箭頭長度 = 速度 × 3（視覺放大）
+                    arrow_scale = 3.0
+                    ex = int(bx + vx * arrow_scale)
+                    ey = int(by + vy * arrow_scale)
+                    exceeds = vel >= min_vel and vy <= -min_upward
+                    arrow_color = (0, 0, 255) if exceeds else (128, 128, 128)
+                    cv2.arrowedLine(preview, (bx, by), (ex, ey),
+                                    arrow_color, 2, cv2.LINE_AA,
+                                    tipLength=0.3)
+                    cv2.putText(preview, f"{vel:.1f}",
+                                (bx + 10, by - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                arrow_color, 1, cv2.LINE_AA)
+
+            info_text = (f"速度: {max_vel_shown:.1f} px/幀 "
+                         f"(閾值: {min_vel}, 上升: {min_upward})")
+        else:
+            cv2.putText(preview, f"min_vel={min_vel}, proximity={proximity}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (200, 100, 0), 1, cv2.LINE_AA)
+
+        self._show_on_canvas(self._shot_canvas, preview,
+                             store_attr="_shot_photo")
+        self._shot_label.configure(text=info_text)
+
+    def _recompute_attribution(self):
+        """重新計算歸因（呼叫 app.py callback）。"""
+        if self._on_recompute:
+            self._on_recompute()
+            # 重新整理預覽
+            self._schedule_ownership_preview()
+            self._schedule_shot_preview()
+
+    # ══════════════════════════════════════════════════
     # 清理
     # ══════════════════════════════════════════════════
 
     def destroy(self):
         if self._preview_after_id is not None:
             self.after_cancel(self._preview_after_id)
+        if self._ownership_preview_after_id is not None:
+            self.after_cancel(self._ownership_preview_after_id)
+        if self._shot_preview_after_id is not None:
+            self.after_cancel(self._shot_preview_after_id)
         super().destroy()

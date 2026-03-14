@@ -10,7 +10,8 @@ from config import (
     AREA_WEIGHT, AREA_SCALE, MAX_AREA_RATIO, STITCH_AMBIGUITY_RATIO,
     SCORE_PROXIMITY_FRAMES, SCORE_MAX_SHOOTER_DIST,
     SCORE_ZONE_DWELL_FRAMES, SCORE_COOLDOWN_FRAMES,
-    SHOT_MIN_VELOCITY, SHOT_ROBOT_PROXIMITY,
+    SHOT_MIN_VELOCITY, SHOT_MIN_UPWARD_VELOCITY, SHOT_ROBOT_PROXIMITY,
+    BALL_OWNERSHIP_DIST,
     ROBOT_TRACKER_TYPE, ROBOT_MAX_LOST_FRAMES,
     ROBOT_DETECTION_CONFIDENCE, ROBOT_DETECTION_NMS_IOU,
     BYTETRACK_TRACK_THRESH, BYTETRACK_LOST_BUFFER,
@@ -62,8 +63,12 @@ class RuntimeConfig:
     score_zone_dwell_frames: int = SCORE_ZONE_DWELL_FRAMES
     score_cooldown_frames: int = SCORE_COOLDOWN_FRAMES
 
+    # ── 進球判定（進階）──
+    ball_ownership_dist: int = BALL_OWNERSHIP_DIST
+
     # ── 出手偵測 ──
     shot_min_velocity: int = SHOT_MIN_VELOCITY
+    shot_min_upward_velocity: int = SHOT_MIN_UPWARD_VELOCITY
     shot_robot_proximity: int = SHOT_ROBOT_PROXIMITY
 
     # ── 機器人追蹤 ──

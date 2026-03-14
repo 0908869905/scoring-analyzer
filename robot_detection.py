@@ -12,6 +12,7 @@ ONNX 支援兩種輸出格式:
 """
 
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -53,6 +54,7 @@ class RobotDetectorONNX:
         self._img_h = self._input_shape[2]  # typically 640
         self._img_w = self._input_shape[3]  # typically 640
         self._nms_iou = nms_iou
+        self._local = threading.local()  # per-thread buffer 預分配
 
         # 讀取類別名稱（若模型 metadata 有提供）
         self.class_names = self._read_class_names()
@@ -74,20 +76,36 @@ class RobotDetectorONNX:
         return []
 
     def _preprocess(self, frame: np.ndarray):
-        """BGR 影像 → 正規化 + 等比縮放 + 填充（letterbox）。"""
+        """BGR 影像 → 正規化 + 等比縮放 + 填充（letterbox）。
+
+        使用 per-thread 預分配 buffer 避免每次推理重新分配記憶體。
+        """
         h0, w0 = frame.shape[:2]
         scale = min(self._img_w / w0, self._img_h / h0)
         new_w = int(w0 * scale)
         new_h = int(h0 * scale)
-        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(frame, (new_w, new_h),
+                             interpolation=cv2.INTER_LINEAR)
 
-        canvas = np.full((self._img_h, self._img_w, 3), 114, dtype=np.uint8)
+        # 重用 per-thread buffer（thread-safe，支援並行偵測）
+        loc = self._local
+        if not hasattr(loc, 'canvas'):
+            loc.canvas = np.empty(
+                (self._img_h, self._img_w, 3), dtype=np.uint8)
+            loc.blob = np.empty(
+                (1, 3, self._img_h, self._img_w), dtype=np.float32)
+        canvas = loc.canvas
+        blob = loc.blob
+
+        canvas[:] = 114
         pad_x = (self._img_w - new_w) // 2
         pad_y = (self._img_h - new_h) // 2
         canvas[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
 
-        blob = canvas[:, :, ::-1].astype(np.float32) / 255.0
-        blob = blob.transpose(2, 0, 1)[np.newaxis, ...]
+        # BGR→RGB + uint8→float32 + HWC→CHW — 零中間陣列分配
+        for c in range(3):
+            np.true_divide(canvas[:, :, 2 - c], 255.0, out=blob[0, c])
+
         return blob, scale, pad_x, pad_y
 
     def detect(self, frame: np.ndarray,
