@@ -108,20 +108,26 @@ BYTETRACK_MIN_CONSECUTIVE = 1      # 最少連續幀（3→1: 加速新追蹤建
 MOT_DETECT_INTERVAL = 10           # 每 N 幀做 tiled 偵測（全幀偵測每幀都做）
 MOT_REID_MAX_DIST = 400            # 重新辨識基準距離（像素，會依幀間隔動態縮放）
 MOT_HISTOGRAM_WEIGHT = 0.4         # 顏色直方圖 Re-ID 權重（0=純距離, 1=全靠外觀）
-MOT_REID_MAX_SECONDS = 5           # 重新辨識最大時間窗口（秒，從 3s 提高到 5s）
-MOT_MIN_TRACK_FRAMES = 15          # 最少偵測幀數（少於此值的 label 在後處理中被移除，60fps 下 15 幀 ≈ 0.25 秒）
+MOT_HISTOGRAM_UPDATE_INTERVAL = 3  # 直方圖更新頻率（每 N 幀更新一次，降低計算開銷）
+MOT_MIN_TRACK_FRAMES = 15          # 最少偵測幀數（少於此值的 label 在後處理中被移除，30fps 下 ≈ 0.5 秒）
 MOT_STATIC_MAX_VARIANCE = 100      # 靜止判定：位置變異數閾值（px²，標準差 <10px 視為靜止）
-MOT_STATIC_MIN_FRAMES = 60         # 靜止判定：至少追蹤 N 幀才判定（60fps 下 1 秒，避免誤判短暫停留）
-MOT_MERGE_MAX_OVERLAP = 15         # 合併最大重疊幀數（60fps 下 ≈ 250ms）
+MOT_STATIC_MIN_FRAMES = 30         # 靜止判定：至少追蹤 N 幀才判定（30fps 下 1 秒，避免誤判短暫停留）
+MOT_MERGE_MAX_OVERLAP = 15         # 合併最大重疊幀數（30fps 下 ≈ 500ms）
 MOT_MERGE_BOUNDARY_DIST = 800      # 合併邊界距離閾值（像素）
-MOT_MERGE_SEARCH_WINDOW = 180      # 合併邊界搜尋窗口（幀數，60fps 下 ≈ 3 秒）
+MOT_MERGE_SEARCH_WINDOW = 180      # 合併邊界搜尋窗口（幀數，30fps 下 ≈ 6 秒）
+# ── MOT 遮擋處理 ────────────────────────────────────
+MOT_MAX_LOST_FRAMES = 90           # LOST 最大容忍幀數（30fps 下 3 秒）
+MOT_OCCLUSION_PATIENCE = 450       # 遮擋區域 LOST 耐心（30fps 下 15 秒）
+MOT_LOST_GRACE_FRAMES = 3          # 連續未偵測幀數閾值，超過後 ACTIVE → LOST
+MOT_LOST_REID_DIST_SCALE = 0.5     # LOST 復活距離閾值倍率（更嚴格）
+MOT_LOST_MIN_HIST_SIM = 0.3        # LOST 復活最低直方圖相似度
+MOT_OCCLUSION_MARGIN = 50          # 遮擋區域邊緣緩衝（像素）
 
 # ── 進球判定參數 ──────────────────────────────────────
 SCORE_PROXIMITY_FRAMES = 15  # 回溯射手歸因的幀數
 SCORE_MAX_SHOOTER_DIST = 500 # 射手歸因最大距離（像素，4K 下需 500+）
-SCORE_ZONE_DWELL_FRAMES = 3  # 球在區域內停留幀數才算進球
+SCORE_ZONE_DWELL_FRAMES = 1  # 球進入區域即算進球
 SCORE_COOLDOWN_FRAMES = 10   # 同一球連續進球冷卻幀數
-HP_ATTRIBUTION_DIST = 300    # 球軌跡點離 HP 線段多近才歸因給 HP（像素）
 BALL_OWNERSHIP_DIST = 200    # 球所有權：球距機器人多近才算「持有」（像素，4K 下約機器人 2-3 倍半徑）
 
 # ── 出手偵測參數 ──────────────────────────────────────

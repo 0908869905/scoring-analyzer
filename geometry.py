@@ -82,6 +82,26 @@ def point_to_segment_distance(px, py, x1, y1, x2, y2):
     return math.hypot(px - proj_x, py - proj_y)
 
 
+def min_distance_to_polygon_edge(px, py, polygon):
+    """計算點 (px, py) 到多邊形最近邊的距離。
+
+    Args:
+        px, py: 點座標
+        polygon: [(x1, y1), (x2, y2), ...] 多邊形頂點列表
+    """
+    n = len(polygon)
+    if n < 2:
+        return float('inf')
+    min_dist = float('inf')
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        d = point_to_segment_distance(px, py, x1, y1, x2, y2)
+        if d < min_dist:
+            min_dist = d
+    return min_dist
+
+
 def rect_center(rx, ry, rw, rh):
     """矩形中心座標。"""
     return (rx + rw / 2, ry + rh / 2)

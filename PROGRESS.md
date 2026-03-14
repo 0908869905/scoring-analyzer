@@ -1,5 +1,334 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-03-14 (15) — MOT 遮擋處理實作（10/10 tasks 完成）
+
+### 完成項目
+- [x] **T1: config.py 常數更新** — 新增 6 個遮擋常數（MOT_MAX_LOST_FRAMES=90, MOT_OCCLUSION_PATIENCE=450, MOT_LOST_GRACE_FRAMES=3, MOT_LOST_REID_DIST_SCALE=0.5, MOT_LOST_MIN_HIST_SIM=0.3, MOT_OCCLUSION_MARGIN=50），移除 MOT_REID_MAX_SECONDS，修正 FPS 註解 60→30，MOT_STATIC_MIN_FRAMES 60→30
+- [x] **T2: geometry.py helper** — 新增 `min_distance_to_polygon_edge()` 函數（點到多邊形各邊最短距離）
+- [x] **T3: robot_tracker.py 資料結構** — 新增 `_track_state`, `_lost_since`, `_missed_frames`, `_occlusion_zones`, `_static_labels`；移除 `_reid_max_frames` 和死碼 `_try_reid()`；新增 `set_occlusion_zones()`
+- [x] **T4: _match_direct() 兩輪匹配** — 重寫為 Round 1（ACTIVE 貪心匹配）+ Round 2（LOST 復活，凍結位置+嚴格 Re-ID 門檻）+ ACTIVE→LOST grace period + LOST→REMOVED 超時清理 + 遮擋區域感知（hub 內 15 秒耐心）
+- [x] **T5: cleanup 方法更新** — `clear()`, `filter_short_labels()`, `_execute_merges()` 加入 state machine 清理；`filter_static_labels()` 從刪除改為標記式（`_static_labels` set）
+- [x] **T6: OcclusionZone dataclass** — `app.py` 新增 `OcclusionZone` dataclass + `_occlusion_zones` 列表
+- [x] **T7: 遮擋區域 UI** — 「遮擋區域」按鈕 + 多邊形點擊/右鍵取消/雙擊完成 + 灰色頂點渲染
+- [x] **T8: LOST 渲染** — 遮擋區域半透明灰色填充 + LOST 機器人虛線框 `_draw_dashed_rect()` + LOST 灰色標籤
+- [x] **T9: 整合** — 分析時傳遞 occlusion zones 到追蹤器 + `RobotTrackerManager.set_occlusion_zones()` + `_analysis_robot_mgr` 引用保存
+- [x] **T10: 端對端驗證** — 全部 import 通過 + AST 語法檢查 + 常數值驗證 + 功能測試
+
+### 修改檔案
+- `config.py` — 新增 6 個遮擋常數，移除 MOT_REID_MAX_SECONDS，修正 FPS 註解，MOT_STATIC_MIN_FRAMES 60→30
+- `geometry.py` — 新增 `min_distance_to_polygon_edge()` 函數
+- `robot_tracker.py` — Track State Machine（ACTIVE/LOST/REMOVED 三態）+ 兩輪匹配 + 遮擋區域感知 + `filter_static_labels` 標記式 + 移除死碼 `_try_reid()`
+- `app.py` — OcclusionZone dataclass + 遮擋區域 UI（按鈕+多邊形繪製）+ LOST 渲染（虛線框+灰色標籤+半透明填充）+ 分析整合
+
+### 5-Question Reboot Check
+1. **做什麼？** 實作 MOT 遮擋處理方案 C（Track State Machine + 遮擋區域感知），解決機器人被 hub 遮住時追蹤框亂跳搶 ID 的問題
+2. **進度？** 全部 10/10 tasks 完成，程式碼已通過 import + AST + 常數驗證，尚未 git commit
+3. **下一步？** 手動測試：開影片 → 標記遮擋區域（hub 多邊形）→ 執行分析 → 觀察 LOST 機器人行為（虛線框、凍結位置、復活匹配）→ 根據測試結果調參（MOT_MAX_LOST_FRAMES, MOT_OCCLUSION_PATIENCE 等）
+4. **阻礙？** 無程式碼阻礙，需要實際影片測試驗證行為正確性
+5. **檔案？** `robot_tracker.py`（Track State Machine 核心邏輯）、`app.py`（OcclusionZone UI + LOST 渲染 + 整合）、`config.py`（遮擋常數）、`geometry.py`（`min_distance_to_polygon_edge`）、`docs/superpowers/plans/2026-03-13-mot-occlusion-handling.md`（實作計劃參考）
+
+---
+
+## Session: 2026-03-14 (14) — 影片分析效能優化研究 + Pipeline 並行架構實作
+
+### 完成項目
+- [x] **完整分析 pipeline 效能瓶頸研究** — 深入分析 `_run_analysis()` 每幀處理流程，定位 YOLO CPU 推理佔 76% 時間為主要瓶頸
+- [x] **CUDA vs DirectML 建議** — 建議先裝 DirectML（一行 pip），CUDA 只多省 ~30-40 秒但需 4GB Toolkit
+- [x] **Pipeline 並行可行性分析** — 確認偵測是無狀態的可提前執行，追蹤是有狀態的必須依序
+- [x] **Tier 0A: DirectML 安裝** — 用戶自行安裝 onnxruntime-directml（YOLO 推理 55ms → ~18ms）
+- [x] **Tier 2A: 前景遮罩移除** — 用戶已移除背景模型前景遮罩
+- [x] **Tier 1A: Pipeline 並行架構** — 主分析迴圈改為 producer-consumer 架構：
+  - `robot_tracker.py`: 拆分 `_MOTTracker.update_all()` 為 `detect_raw()` + `track_update()`
+  - `robot_tracker.py`: `RobotTrackerManager` 加上對應 pipeline API
+  - `app.py`: 主迴圈改為 `Queue(maxsize=8)` + producer Thread，Producer 讀幀+球偵測+機器人偵測（提前 8 幀），Consumer 追蹤匹配+進球判定（依序）
+- [x] **Tier 2B: 預分配 canvas + blob buffer** — `robot_detection.py` 用 `threading.local()` per-thread 預分配 buffer，`_preprocess` 零中間陣列分配（4.18ms → 2.30ms, 1.82x 加速）
+- [x] **Tier 2C: 移除 frame.copy()** — `robot_tracker.py` tiled 偵測提交時不再複製 frame（只讀不改），省 2MB/每10幀
+- [x] **Tier 2D 分析結論** — 快取更新迴圈非冗餘（interpolate 後需重新查詢），保留不刪
+
+### 修改檔案
+- `robot_detection.py` — import threading, `__init__` 加 `threading.local()`, `_preprocess` 改為預分配 buffer 重用
+- `robot_tracker.py` — `_MOTTracker` 加 `detect_raw()`/`track_update()` 方法, `RobotTrackerManager` 加對應 pipeline API, 移除 tiled 偵測的 `frame.copy()`
+- `app.py` — 主分析迴圈 `_run_analysis()` 改為 Pipeline producer-consumer 架構（Queue + producer Thread）
+
+### 效能預估
+| 方案 | 每幀吞吐 | 4500幀 | 加速 |
+|------|---------|--------|------|
+| 舊 (CPU) | 75ms | 5.6 min | 1x |
+| + DirectML | 34ms | 2.6 min | 2.2x |
+| + Pipeline | 20ms | 1.5 min | 3.8x |
+| + 預分配 buffer | 18ms | 1.4 min | 4.2x |
+
+### 5-Question Reboot Check
+1. **做什麼？** 影片分析效能優化，已完成 Pipeline 並行架構 + DirectML + 預分配 buffer + 移除 frame.copy
+2. **進度？** 全部 4 個 Tier 實作完成，待用戶實際測試驗證效能數據
+3. **下一步？** 回到 MOT 遮擋處理實作（Session 13 的計劃，0/10 tasks），或根據用戶實測結果微調 Pipeline 參數（Queue maxsize、prefetch 幀數等）
+4. **阻礙？** 無阻礙，Pipeline 架構已實作完成
+5. **檔案？** `app.py`（Pipeline producer-consumer 主迴圈）、`robot_tracker.py`（detect_raw/track_update 拆分）、`robot_detection.py`（預分配 buffer）、`docs/superpowers/plans/2026-03-13-mot-occlusion-handling.md`（下一步的 MOT 遮擋處理計劃）
+
+---
+
+## Session: 2026-03-13 (13) — MOT 遮擋處理設計 + 實作計劃
+
+### 完成項目
+- [x] **MOT 遮擋問題根因分析** — 深度研究 `robot_tracker.py` 的 `_match_direct()` 邏輯，找到 5 個根本原因：無 LOST 狀態、速度外推飄移、距離閾值過寬、無最大消失幀、插值平滑化誤跳
+- [x] **業界方案研究** — 研究 ByteTrack/SORT/DeepSORT/BoT-SORT 的遮擋處理方式（兩輪配對、Kalman 預測、Re-ID 外觀特徵）
+- [x] **設計方案選擇** — 提出 3 種方案（A: State Machine、B: 遮擋區域感知、C: A+B 結合），用戶選擇方案 C
+- [x] **設計規格文件** — 完成 `docs/superpowers/specs/2026-03-13-mot-occlusion-handling-design.md`，經 2 輪 spec review 通過
+- [x] **實作計劃** — 完成 `docs/superpowers/plans/2026-03-13-mot-occlusion-handling.md`（10 個 task），經 plan review 修正後提交
+
+### 設計核心
+- **Track State Machine**: ACTIVE → LOST → REMOVED 三態
+- **兩輪配對**: Round 1 (ACTIVE only) + Round 2 (LOST revival，Re-ID 加權距離)
+- **遮擋區域感知**: 用戶標記 hub 多邊形，LOST 在遮擋區域有 15 秒耐心（`MOT_OCCLUDED_PATIENCE_SEC`）
+- **Grace period**: 3 幀未偵測才轉 LOST（防偵測閃爍，`MOT_GRACE_FRAMES`）
+- **filter_static_labels 改標記式**: 靜止機器人不再刪除，只標記 `is_static=True`，保留 label 顯示
+- **FPS 預設 30**: `DEFAULT_FPS` 從 60 改 30
+- **MOT_REID_MAX_SECONDS 被取代**: 新 state machine 的 patience 機制取代舊的 Re-ID 超時
+
+### 新增檔案
+- `docs/superpowers/specs/2026-03-13-mot-occlusion-handling-design.md` — 設計規格（Track State Machine + 遮擋區域感知）
+- `docs/superpowers/plans/2026-03-13-mot-occlusion-handling.md` — 10 步實作計劃
+
+### 修改檔案
+- 尚未開始實作，計劃修改：`config.py`、`robot_tracker.py`、`app.py`、`geometry.py`、`scoring.py`、`runtime_config.py`、`settings_window.py`
+
+### 5-Question Reboot Check
+1. **做什麼？** 實作 MOT 遮擋處理方案 C（Track State Machine + 遮擋區域感知），解決機器人被 hub 遮住時追蹤框亂跳搶 ID 的問題
+2. **進度？** 設計+計劃全部完成，尚未開始實作（0/10 tasks）
+3. **下一步？** 執行實作計劃 Task 1: config.py 常數更新（新增 MOT_GRACE_FRAMES=3, MOT_LOST_PATIENCE_SEC=5, MOT_OCCLUDED_PATIENCE_SEC=15, MOT_LOST_REVIVAL_DIST_FACTOR=1.5 等；DEFAULT_FPS 改 30；移除 MOT_REID_MAX_SECONDS）
+4. **阻礙？** 無阻礙，設計已通過 review，可直接開始實作
+5. **檔案？** `docs/superpowers/plans/2026-03-13-mot-occlusion-handling.md`（實作計劃，按 task 順序執行）、`docs/superpowers/specs/2026-03-13-mot-occlusion-handling-design.md`（設計規格，實作時參考）、`robot_tracker.py`（主要修改目標）、`config.py`（Task 1 起點）
+
+---
+
+## Session: 2026-03-13 (12) — HP 歸因改線段交叉 + 設定面板預覽增強
+
+### 完成項目
+- [x] **HP 歸因改為線段交叉判定** — `scoring.py` 的 `_check_hp_attribution()` 從距離判定（`point_to_segment_distance ≤ HP_ATTRIBUTION_DIST`）改為 `segments_intersect()` 線段交叉判定，移除 `HP_ATTRIBUTION_DIST` 常數
+- [x] **RuntimeConfig 補齊參數** — `runtime_config.py` 新增 `ball_ownership_dist` 和 `shot_min_upward_velocity` 欄位
+- [x] **app.py 傳參修正 + 新增 callback** — ScoringEngine 建構補傳 `ball_ownership_dist`、`shot_min_upward_velocity`；新增 `_get_analysis_data_for_preview()` 和 `_on_recompute_attribution()` 方法
+- [x] **進球 Tab 增強** — `settings_window.py` 的 `_build_scoring_tab()` 改為雙區架構（上方 slider + 下方預覽 canvas），新增 `ball_ownership_dist` slider + 「重新計算歸因」按鈕 + 即時預覽（顯示 ownership 圓圈、球-機器人連線、距離數字）
+- [x] **出手 Tab 增強** — `_build_shot_tab()` 同樣改為雙區架構，新增 `shot_min_upward_velocity` slider + 「重新計算歸因」按鈕 + 即時預覽（顯示 proximity 圓圈、速度箭頭、速度數值）
+- [x] **預覽渲染函數** — 新增 `_update_ownership_preview()` 和 `_update_shot_preview()`，使用 OpenCV 繪圖，100ms debounce 更新
+
+### 修改檔案
+- `config.py` — 移除 `HP_ATTRIBUTION_DIST` 常數
+- `runtime_config.py` — 新增 `ball_ownership_dist`、`shot_min_upward_velocity` 欄位；新增 import
+- `scoring.py` — `_check_hp_attribution()` 改用 `segments_intersect()`；移除 `hp_attribution_dist` 參數和成員
+- `app.py` — ScoringEngine 補傳參數；新增 `_get_analysis_data_for_preview()`、`_on_recompute_attribution()`；SettingsPanel 傳入新 callback
+- `settings_window.py` — 進球/出手 Tab 改為雙區架構 + 預覽渲染 + 重新計算歸因按鈕
+
+### 5-Question Reboot Check
+1. **做什麼？** HP 歸因從距離判定改為線段交叉判定，設定面板進球/出手 Tab 增加即時預覽和重新計算功能
+2. **進度？** 程式碼修改全部完成，待實際影片測試驗證
+3. **下一步？** (1) 用實際影片測試線段交叉 HP 歸因的準確度 (2) 驗證設定面板預覽渲染在不同解析度下的顯示效果 (3) 確認 recompute attribution 能正確即時更新結果
+4. **阻礙？** (a) 線段交叉判定可能需要微調球軌跡片段長度 (b) 預覽渲染性能待觀察（100ms debounce 是否足夠）
+5. **檔案？** `scoring.py`（HP 歸因邏輯）、`settings_window.py`（預覽渲染）、`app.py`（callback 串接）、`runtime_config.py`（新參數）
+
+---
+
+## Session: 2026-03-12 (11) — 4 人分工審核收回 + 本地 GPU 訓練部署
+
+### 完成項目
+- [x] **收回 4 人審核標註** — 4 台筆電分工審核後的 labels 收回到 `E:\labels\labels1~4\`，合併回 `datasets/reviewed/labels/`（train 1461 + val 1365）
+- [x] **用 label_editor 最終確認** — train 和 val 全部再確認一次
+- [x] **建立 `datasets/reviewed/` 乾淨資料集** — 審核完的 images+labels 獨立存放，含 data.yaml，之後訓練直接用這個
+- [x] **4 人分工切割** — 1826 張切成 part1~4（457/457/457/455），建立在 `datasets/reviewed/part1~4/`，每個有 images/ + labels/
+- [x] **打包 4 份 zip** — part1.zip~part4.zip 方便分發到各筆電
+- [x] **複製到 E: 隨身碟** — reviewed 完整資料集 + part1~4 + zip + label_editor.py 全部複製到 `E:/scoring-analyzer-deploy/`
+- [x] **本地 GPU 訓練準備** — 改為在 RTX 3070 Ti 筆電本地訓練（不用 Colab），建立 `E:/frc_training/`：train.py + dataset/ + data.yaml
+- [x] **修復 train.py 兩個錯誤** — (1) E: 硬編碼路徑改為相對路徑（目標筆電 SSD 是 D:） (2) 加 `if __name__ == "__main__"` + `workers=0` 解決 Windows multiprocessing spawn 錯誤
+- [ ] **訓練中** — 用戶在 3070 Ti 筆電上執行 `python train.py`，訓練進行中
+
+### 修改檔案
+- `datasets/reviewed/` — 新建乾淨資料集目錄（images/ + labels/ + data.yaml）
+- `datasets/reviewed/part1~4/` — 分工切割（各含 images/ + labels/）
+- `E:/frc_training/train.py` — 本地訓練腳本（YOLOv26n, 100 epochs, device=0）
+- `E:/frc_training/dataset/` — 完整 reviewed 資料集副本
+- `E:/scoring-analyzer-deploy/` — 同步更新（reviewed + parts + zips + label_editor.py）
+
+### 5-Question Reboot Check
+1. **做什麼？** 收回 4 人分工審核標註，建立乾淨 reviewed 資料集，部署到 RTX 3070 Ti 筆電本地訓練
+2. **進度？** 資料準備全部完成，3070 Ti 筆電正在訓練 YOLOv26n 100 epochs
+3. **下一步？** (1) 等訓練完成取回新 frc_robot.onnx (2) 部署到 models/ 取代舊模型 (3) 實際影片測試新模型效果 (4) 與 Colab T4 訓練結果對比
+4. **阻礙？** (a) 訓練中，需等完成 (b) 3070 Ti 8GB VRAM 訓練速度待觀察 (c) 新模型效果待驗證
+5. **檔案？** `datasets/reviewed/`（乾淨資料集）、`E:/frc_training/train.py`（訓練腳本）、`models/frc_robot.onnx`（訓練完成後要替換的模型）
+
+---
+
+## Session: 2026-03-12 (10) — 訓練資料最終驗證 + 重新打包
+
+### 完成項目
+- [x] **E: deploy 目錄同步** — 新模型 + 核心 Python 檔案同步到 `E:/scoring-analyzer-deploy/`
+- [x] **Train split 二次審核（1461 張）** — 用 label_editor 再次開啟 merged train 全部 1461 張，用戶有修正部分標註
+- [x] **Val split 二次審核（365 張）** — 用 label_editor 再次開啟 merged val 全部 365 張，用戶也有修正
+- [x] **發現 zip 不一致問題** — 比對發現之前的 zip 跟磁碟上的 label 不一致（文字模式換行差異，實際 binary 一致），但用戶後來又修正了標註需重新打包
+- [x] **重新打包 merged.zip** — 最終版 398 MB，1826 張（train 1461 + val 365），包含二次審核修正
+- [x] **最終確認** — 用戶最後再開 train 和 val 確認標註正確，val 無改動，train 之前有改已重新打包
+- [x] **train_colab.ipynb 更新提醒** — Drive 上的 notebook 是舊版，需用戶手動上傳覆蓋或在 Colab 改路徑
+
+### 修改檔案
+- `datasets/merged/train/labels/` — 二次審核修正部分標註
+- `datasets/merged/val/labels/` — 二次審核修正部分標註
+- `datasets/merged.zip` — 重新打包（含二次審核修正）
+
+### 5-Question Reboot Check
+1. **做什麼？** 反覆驗證 merged dataset 標註品質，二次審核 train+val 全部 1826 張，修正後重新打包 merged.zip
+2. **進度？** 標註驗證+重新打包完成，merged.zip 需重新上傳到 Google Drive，Colab 訓練待執行
+3. **下一步？** (1) 重新上傳 merged.zip 到 Google Drive (2) 在 Colab 跑 100 epochs 重訓 YOLOv26n (3) 下載新 frc_robot.onnx 部署到 models/ (4) 實際影片測試新模型效果
+4. **阻礙？** (a) merged.zip 需重新上傳到 Drive（398 MB） (b) train_colab.ipynb Drive 上是舊版，需手動上傳覆蓋或 Colab 內改路徑 (c) Colab 訓練需用戶手動執行
+5. **檔案？** `datasets/merged.zip`（重新打包的訓練資料）、`train_colab.ipynb`（Colab 訓練 notebook）、`models/frc_robot.onnx`（訓練完成後要替換的模型）
+
+---
+
+## Session: 2026-03-11 (9) — Train+Val 手動修正 + 重新打包 + Colab 訓練準備
+
+### 完成項目
+- [x] **同步 E: 隨身碟** — 把 session 8 的新模型和更新過的 Python 檔案同步到 `E:/scoring-analyzer-deploy/`
+- [x] **Train split 手動修正（1461 張）** — 用 label_editor 逐張審核 `datasets/merged/train/` 的所有標註，手動修正錯誤 bbox（移動/resize/刪除/新增）
+- [x] **Val split 手動修正（365 張）** — 同上，`datasets/merged/val/` 的標註也全部審核修正
+- [x] **重新打包 merged.zip** — 包含手動修正過的 train+val labels（398 MB），供 Colab 重訓
+- [x] **上傳 merged.zip 到 Google Drive** — 透過 Chrome 瀏覽器自動化開啟 Google Drive，用戶手動拖入上傳
+- [x] **更新 train_colab.ipynb** — 路徑改為 merged.zip、epochs=100、data.yaml 路徑修正（本地已更新，Drive 上的舊版需用戶手動上傳覆蓋）
+- [x] **向用戶解釋 val split 用途** — 驗證集用於防過擬合、選 best checkpoint，不參與訓練
+
+### 修改檔案
+- `train_colab.ipynb` — 路徑與參數修正（本地更新）
+- `datasets/merged/train/labels/` — 1461 張標註手動修正
+- `datasets/merged/val/labels/` — 365 張標註手動修正
+- `datasets/merged.zip` — 重新打包（含手動修正標註）
+
+### 5-Question Reboot Check
+1. **做什麼？** 手動修正 merged dataset 全部 1826 張標註，重新打包上傳，準備 Colab 重訓
+2. **進度？** 標註修正+打包+上傳完成，Colab 訓練待用戶手動執行
+3. **下一步？** (1) 在 Google Colab 上用修正後的 merged.zip 重訓 YOLOv26n 100 epochs (2) 下載新 frc_robot.onnx 部署到 models/ (3) 實際影片測試新模型效果
+4. **阻礙？** (a) Colab 訓練需要用戶手動執行（merged.zip 已上傳 Drive） (b) train_colab.ipynb 需要用戶手動上傳覆蓋 Drive 上的舊版
+5. **檔案？** `train_colab.ipynb`（Colab 訓練 notebook）、`datasets/merged/`（修正後資料集）、`models/frc_robot.onnx`（訓練完成後要替換的模型）
+
+---
+
+## Session: 2026-03-11 (8) — 標註品質修復 + 資料集重建 + 模型重訓
+
+### 完成項目
+- [x] **壞幀偵測與清除** — 寫了 `detect_bad_frames.py` 掃描 merged dataset，找到 9 張異常幀（比賽結束白霧/紙花畫面、計分板、過曝+大量假標註），從 train images+labels 移除
+- [x] **審核標註同步問題修復** — 發現 `merge_datasets.py` 合併時用 D: 的 `labels_raw`，但 okok/bcvi/tuis 三個賽事的人工審核修正只存在 E: 隨身碟（`E:/scoring-analyzer-deploy/datasets/`），從未同步回 D:。導致 merged 中這三個賽事用的是 Gemini 未校正的原始標註
+- [x] **同步審核標註** — 從 E: 隨身碟複製 okok/bcvi/tuis 的審核過 labels_raw 回 D: 的 datasets 目錄
+- [x] **重建 merged 資料集** — 重跑 `merge_datasets.py`，新 merged: 1826 張（train 1461 + val 365），比之前 1865 少 39 張（審核時刪除的空標註被過濾掉）
+- [x] **label_editor 最終審核** — 用 label_editor 審核了 train 和 val split，確認標註品質正確
+- [x] **更新 train_colab.ipynb** — 路徑改為 merged.zip、epochs=100、data.yaml 路徑修正
+- [x] **打包 datasets/merged.zip** — 398 MB，供 Colab 上傳訓練
+- [x] **Colab T4 訓練完成** — YOLOv26n 100 epochs，下載新 frc_robot.onnx
+- [x] **部署新模型** — `frc_robot (3).onnx` → `models/frc_robot.onnx`（9.8 MB, [1,3,640,640] → [1,300,6] NMS-Free），舊模型備份為 `frc_robot_old.onnx`
+
+### 修改檔案
+- `detect_bad_frames.py` — 新建，掃描 merged dataset 找異常幀（基於 label 數量異常+圖片亮度/色彩統計）
+- `merge_datasets.py` — 重跑合併（無程式碼修改，資料來源修正後重跑）
+- `train_colab.ipynb` — 路徑改為 merged.zip、epochs=100、data.yaml 路徑修正
+- `models/frc_robot.onnx` — 用修正後資料集重訓的新模型（9.8 MB, NMS-Free）
+- `models/frc_robot_old.onnx` — 舊模型備份
+- `datasets/2026okok/labels_raw/` — 從 E: 同步審核過的標註
+- `datasets/2026bcvi/labels_raw/` — 從 E: 同步審核過的標註
+- `datasets/2026tuis/labels_raw/` — 從 E: 同步審核過的標註
+- `datasets/merged/` — 重建，1826 張（train 1461 + val 365）
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復標註品質問題（壞幀+未同步審核標註），重建資料集，重訓並部署新模型
+2. **進度？** 全部完成 — 壞幀清除、標註同步、資料集重建、Colab 訓練、模型部署皆已完成
+3. **下一步？** (1) 實際影片測試新模型偵測效果（與舊模型對比） (2) 評估是否需要更多賽事資料擴增訓練集 (3) 考慮 CUDA onnxruntime-gpu 加速
+4. **阻礙？** (a) 尚未在實際影片上測試新模型效果 (b) 3070Ti Python 3.14 無 CUDA PyTorch wheels
+5. **檔案？** `models/frc_robot.onnx`（新模型）、`robot_detection.py`（YOLO 偵測器）、`detect_bad_frames.py`（壞幀偵測工具）、`merge_datasets.py`（資料集合併）
+
+---
+
+## Session: 2026-03-11 (7) — 效能優化 6 步計劃實作（5/6 完成）
+
+### 完成項目
+- [x] **Step 1: 軌跡幀索引** — `app.py`: 從 `_all_trajectories` 預建 `_trajectory_by_frame` dict，`_draw_analysis_overlay_impl` 和 debug 4-panel 改用索引查詢，複雜度 O(2000)→O(~200)
+- [x] **Step 2: Tiled 偵測非同步化** — `robot_tracker.py`: `ThreadPoolExecutor(1)` 背景執行 tiled 偵測，下一幀消費結果（非阻塞），消除 +100ms 尖峰
+- [x] **Step 3: 直方圖提取降頻** — `robot_tracker.py` + `config.py`: 新增 `MOT_HISTOGRAM_UPDATE_INTERVAL=3`，只在新 label 或每 3 幀才提取/更新直方圖，5-6ms→1-2ms
+- [x] **Step 4: 背景遮罩快取** — `app.py`: `_debug_fg_cache` 快取 (frame_idx, mask)，同一幀不重算前景遮罩
+- [ ] **Step 5: ImageTk 優化** — 跳過（PIL 路徑因中文標籤需求無法避免）
+- [x] **Step 6: 進度更新降頻** — `app.py`: 從每 5 幀改為每 20 幀更新 UI 進度
+
+### 修改檔案
+- `config.py` — 新增 `MOT_HISTOGRAM_UPDATE_INTERVAL = 3`
+- `robot_tracker.py` — tiled 非同步化（ThreadPoolExecutor）+ 直方圖降頻（interval gating）+ import ThreadPoolExecutor
+- `app.py` — 軌跡幀索引 `_trajectory_by_frame` + `_build_trajectory_index()` + 背景遮罩快取 `_debug_fg_cache` + 進度更新降頻 20 幀
+
+### 預估效能提升
+- 分析管線：平均每幀 ~20ms → ~10ms（~2x 加速）
+- 播放渲染：正常 ~35ms → ~25ms；Debug ~120ms → ~80ms
+
+### 5-Question Reboot Check
+1. **做什麼？** 實作效能優化 6 步計劃中的 5 步（Step 5 跳過）
+2. **進度？** 5/6 步已完成並寫入程式碼，Step 5 因中文標籤需求跳過
+3. **下一步？** (1) 實際影片測試確認效能提升幅度 (2) 實際影片測試新 YOLO 模型偵測效果 (3) 考慮 CUDA onnxruntime-gpu 加速（需 Python <3.13）
+4. **阻礙？** (a) 尚未實際測量優化後效能數據（理論估算 ~2x） (b) 3070Ti Python 3.14 無 CUDA PyTorch wheels
+5. **檔案？** `app.py`（軌跡索引+遮罩快取+進度降頻）、`robot_tracker.py`（tiled 非同步+直方圖降頻）、`config.py`（MOT_HISTOGRAM_UPDATE_INTERVAL）
+
+---
+
+## Session: 2026-03-11 (6) — YOLO 模型訓練完成 + ONNX 匯出修復 + 部署 + 效能優化計劃
+
+### 完成項目
+- [x] **YOLOv26n 本地 GPU 訓練完成** — merged dataset (2024mslr 817張 + 5×2026 regional 1048張 = 1865張)，RTX 3070Ti Laptop GPU，100 epochs
+  - 最終結果：mAP50=0.841, mAP50-95=0.463, Precision=0.853, Recall=0.780
+  - 訓練輸出：`E:\merged\runs\detect\train2\`
+- [x] **ONNX 匯出修復** — 初次匯出 imgsz=64（ultralytics 預設）導致偵測結果全為 0，重新匯出 imgsz=640 修復
+  - 輸出格式：[1, 300, 6] (NMS-Free)，模型大小 9.6 MB
+- [x] **模型部署** — 新 frc_robot.onnx 部署到 `models/frc_robot.onnx` + `E:\scoring-analyzer-deploy/`
+  - 複製 14 個核心分析 Python 檔案 + 模型 + presets
+- [x] **效能優化深度研究**（3 個 Sub-Agent 並行分析）
+  - 播放管線：每幀 25-40ms，Debug 4-Panel 80-150ms
+  - 分析管線：正常幀 13-16ms，Tiled 偵測幀 116ms（超標 3.5x）
+  - GPU 加速：DirectML 可提速 3-5x，CUDA 可提速 8-12x
+- [x] **效能優化 6 步計劃制定**（尚未批准執行）
+  - Step 1: 軌跡幀索引（播放 overlay O(2000)→O(200)）
+  - Step 2: Tiled 偵測非同步化（消除 100ms 尖峰）
+  - Step 3: 直方圖提取降頻（5-6ms→1-2ms/幀）
+  - Step 4: 背景遮罩快取（Debug 視圖 -10-15ms）
+  - Step 5: ImageTk 轉換優化（-2-5ms）
+  - Step 6: 進度更新降頻
+
+### 修改檔案
+- `models/frc_robot.onnx` — 新訓練 YOLOv26n 模型（9.6 MB, 640x640, NMS-Free [1,300,6]）
+
+### 5-Question Reboot Check
+1. **做什麼？** YOLO 模型訓練+部署完成，制定效能優化計劃
+2. **進度？** 新模型已部署，效能優化計劃已制定但尚未批准/實作
+3. **下一步？** (1) 實際影片測試新模型偵測效果 (2) 用戶批准後實作效能優化 6 步計劃（涉及 app.py, robot_tracker.py, config.py）(3) 解決 3070Ti Python 3.14 CUDA PyTorch 安裝問題
+4. **阻礙？** (a) 效能優化計劃待用戶批准 (b) 3070Ti 筆電 Python 3.14 無 CUDA PyTorch wheels（cu124 無 3.14 支援）(c) 新模型尚未在實際影片上全面測試
+5. **檔案？** `models/frc_robot.onnx`（新模型）、`robot_detection.py`（YOLO 偵測器）、`app.py`（效能優化主要目標）、`robot_tracker.py`（直方圖降頻優化）、`config.py`（閾值調整）
+
+---
+
+## Session: 2026-03-11 (5) — tuis 標註完成 + 全賽事審核完成 + 資料集合併 + 訓練準備
+
+### 完成項目
+- [x] **tuis Gemini 標註完成** — 250 張圖片自動標註，218/250 有效（32 空，0 錯誤），Red=404, Blue=381 boxes
+- [x] **複製 tuis 到 deploy 目錄** — images_sample + labels_raw 複製到 E:\scoring-analyzer-deploy\datasets\2026tuis\
+- [x] **全部 6 賽事審核完成** — 兩台筆電分工
+  - 本機：cosp, mndu, okok 前半
+  - 另一台筆電：okok 後半, bcvi, tuis
+- [x] **合併資料集** — 建立 merge_datasets.py，合併 2024mslr (817張) + 5×2026 events (1048張) = 1865 張有效訓練資料
+  - 80/20 split: train=1492, val=373
+  - 輸出至 datasets/merged/（含 data.yaml）
+- [x] **準備本地訓練** — 修正 data.yaml path 為相對路徑，打包 merged.zip (403MB) 到 E:\
+- [x] **發現 PyTorch GPU 問題** — 這台電腦 PyTorch 是 CPU 版，3070Ti 筆電需要安裝 CUDA 版 PyTorch
+
+### 修改檔案
+- `merge_datasets.py` — 新建，合併多賽事資料集工具（images+labels → merged/ + data.yaml + 80/20 split）
+- `datasets/merged/` — 合併後資料集輸出（1865 張，train/val split）
+
+### 5-Question Reboot Check
+1. **做什麼？** 完成所有標註+審核+合併，準備 YOLO 模型訓練
+2. **進度？** 1865 張訓練資料已合併打包（403MB merged.zip），待 GPU 訓練
+3. **下一步？** (1) 3070Ti 筆電安裝 CUDA 版 PyTorch (2) 本地 YOLOv8n/YOLOv11n 訓練 (3) 或上傳 Colab T4 訓練 (4) 訓練後匯出 ONNX 替換 models/frc_robot.onnx
+4. **阻礙？** 3070Ti 筆電 PyTorch 是 CPU 版，需 `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` 安裝 CUDA 版
+5. **檔案？** `merge_datasets.py`（合併工具）、`datasets/merged/data.yaml`（訓練入口）、`train_colab.ipynb`（Colab 備案）、`TRAIN_README.txt`（訓練步驟）
+
+---
+
 ## Session: 2026-03-10 (4) — Gemini 自動標註 + Label Editor 審核 + 多解析度裁切修復
 
 ### 完成項目
@@ -992,4 +1321,4 @@
 5. **檔案？** `app.py` (GUI 主程式), `scoring.py` (進球引擎), `robot_tracker.py` (機器人追蹤)
 
 ---
-*Last updated: 2026-03-06*
+*Last updated: 2026-03-13*

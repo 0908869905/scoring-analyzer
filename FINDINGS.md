@@ -2,6 +2,267 @@
 
 *記錄開發過程中的技術發現和決策*
 
+## 2026-03-14: 分析 Pipeline 效能瓶頸 — YOLO 推理佔 76% + Pipeline 並行架構
+
+### 問題
+影片分析速度慢（4500 幀需 5.6 分鐘），用戶希望加速。
+
+### 原因
+逐幀分析 `_run_analysis()` 的時間分佈：
+- YOLO 機器人推理（CPU）: ~55ms/幀 (**76%**)
+- 球偵測 HSV: ~5ms/幀
+- 追蹤匹配: ~3ms/幀
+- 讀幀 + 其他: ~12ms/幀
+
+YOLO 推理是 CPU-bound 的無狀態操作，而追蹤匹配是有狀態的（依賴前一幀結果），兩者天然可以分離。
+
+### 解決方案
+**四層加速方案**：
+1. **DirectML GPU Provider** — `pip install onnxruntime-directml`，YOLO 推理 55ms → ~18ms（3x），一行命令零侵入
+2. **Pipeline 並行架構** — 拆分偵測（無狀態）和追蹤（有狀態），Producer 線程提前 8 幀執行讀幀+偵測，Consumer 在分析線程依序執行追蹤+進球判定
+3. **預分配 buffer** — `robot_detection.py` 的 `_preprocess` 用 `threading.local()` 預分配 canvas + blob，避免每幀 `np.zeros` 分配（4.18ms → 2.30ms）
+4. **移除 frame.copy()** — tiled 偵測提交時確認 frame 只讀，省去 2MB 陣列複製
+
+### 選擇理由
+- **DirectML vs CUDA**: DirectML 一行 pip 安裝、CUDA 需 4GB Toolkit + cuDNN，差距僅 ~30-40 秒/次分析，不值得
+- **Queue vs shared buffer**: Queue 天然 thread-safe，無需手動 lock/condition，程式碼簡單不易出錯
+- **threading.local() vs lock**: 預分配 buffer 用 thread-local storage 支援多線程各自擁有 buffer，不互鎖
+- **Pipeline 不改變分析結果**: 偵測是純函數（同一幀同一模型 = 同一結果），只改變「偵測在什麼時候算完」，追蹤仍然嚴格依序處理
+
+### 關鍵發現
+- `_MOTTracker.update_all()` 可以安全拆分為 `detect_raw()`（無狀態）+ `track_update()`（有狀態），因為偵測不讀任何追蹤器內部狀態
+- Pipeline 的 `maxsize=8` 限制記憶體用量（~8 幀 × 偵測結果 ≈ 可忽略），同時提供足夠的預取緩衝
+- `update_all()` 保留作為向後相容 API，SOT 模式自動 fallback 到原始路徑
+
+---
+
+## 2026-03-13 (#2): MOT 遮擋時追蹤框亂跳搶 ID — 5 個根因 + State Machine 解法
+
+### 問題
+機器人被 hub 完全遮住時，MOT 追蹤器的框會亂跑並搶到其他機器人的 ID，導致追蹤完全錯亂。
+
+### 原因（5 個根因）
+1. **無 LOST 狀態** — `_match_direct()` 對所有已知 track 一視同仁，消失的 track 持續參與匹配，用速度外推的位置去搶其他機器人的偵測
+2. **速度外推飄移** — track 消失後 `_last_known` 的 vx/vy 持續外推位置，多幀後外推位置飄到其他機器人附近
+3. **距離閾值過寬** — 距離閾值固定或動態但偏寬，飄移後的外推位置仍在閾值內，成功搶走其他偵測
+4. **無最大消失幀** — track 可以無限期消失而不被移除，長期消失的 track 成為「幽靈」持續干擾匹配
+5. **插值平滑化誤跳** — 後處理插值在 track 復活時產生從錯誤位置回到正確位置的「跳躍」軌跡
+
+### 解決方案
+**方案 C: Track State Machine + 遮擋區域感知**（結合方案 A+B）
+
+核心設計：
+- **三態 State Machine**: ACTIVE → LOST → REMOVED
+  - ACTIVE: 正常偵測中（含 grace period 3 幀容錯）
+  - LOST: 連續超過 grace 幀未偵測，凍結速度外推，只在 Round 2 低優先級匹配
+  - REMOVED: 超過 patience 時間，永久移除
+- **兩輪配對**: Round 1 只匹配 ACTIVE track（保護正常追蹤），Round 2 用剩餘偵測嘗試復活 LOST track（Re-ID 加權距離）
+- **遮擋區域感知**: 用戶標記 hub 多邊形，LOST track 在遮擋區域內有 15 秒耐心（vs 預設 5 秒），因為被遮住是預期行為
+- **filter_static_labels 改標記式**: 靜止機器人不再被刪除，只標記 `is_static=True`，保留 label 顯示
+
+### 選擇理由
+- **方案 A（純 State Machine）**: 解決根因 1-4，但不了解「為什麼消失」— hub 遮擋是正常情況，不應太快移除
+- **方案 B（純遮擋區域感知）**: 知道遮擋原因但沒有 state machine 保護匹配過程
+- **方案 C（A+B 結合）**: State machine 解決匹配保護 + 遮擋感知解決 patience 智慧化，兩者互補
+- 參考 ByteTrack 的兩輪配對思路，但用距離匹配取代 IoU（符合本專案 4K 小 bbox 場景）
+
+---
+
+## 2026-03-13: HP 歸因從距離判定改為線段交叉判定
+
+### 問題
+HP（Human Player）歸因使用距離判定（`point_to_segment_distance ≤ HP_ATTRIBUTION_DIST=300px`），但 300px 閾值在不同解析度和攝影機角度下不穩定 — 離 HP 線段較遠的進球可能誤判為 HP 餵球，而斜角飛行路徑穿過 HP 線段的球反而可能因距離超出閾值而漏判。
+
+### 原因
+距離判定本質上是一個「圓形區域」檢查 — 球只要在 HP 線段 300px 範圍內就算 HP 歸因，不考慮球的飛行方向。真實的 HP 餵球場景是球從場外經 HP 線段飛入場內，球的軌跡必然**穿越** HP 線段。
+
+### 解決方案
+將 `_check_hp_attribution()` 從 `point_to_segment_distance()` 改為 `segments_intersect()` — 取球軌跡的一段線段（出手幀到進球幀的球位置連線），判斷是否與 HP 線段交叉。移除不再需要的 `HP_ATTRIBUTION_DIST` 常數。
+
+### 選擇理由
+- **線段交叉 vs 距離閾值**: 線段交叉是幾何精確判定，不受解析度和攝影機角度影響，不需要手動調參
+- **移除 `HP_ATTRIBUTION_DIST`**: 閾值類參數容易在不同比賽場地間失效，幾何判定完全消除這個問題
+- **`segments_intersect()` 已存在**: `geometry.py` 已有此函數（用於其他場景），無需新增程式碼
+
+---
+
+## 2026-03-12 (#5): 本地 GPU 訓練取代 Colab — RTX 3070 Ti 部署策略
+
+### 問題
+之前使用 Google Colab T4 訓練 YOLO 模型，但 Colab 有上傳限制、session 斷線、Drive 同步等問題，且團隊已有 RTX 3070 Ti 筆電可用。
+
+### 發現
+
+**Colab vs 本地 GPU 對比：**
+- Colab T4：需上傳 398MB zip 到 Drive，session 可能中斷，免費版有使用量限制
+- RTX 3070 Ti 8GB：本地執行無上傳限制，可隨時監控，但 VRAM 較小（8GB vs T4 16GB）
+- YOLOv26n 模型小（9.8MB），8GB VRAM 足夠訓練 640x640 batch
+
+**4 人分工審核流程建立：**
+- 1826 張切成 4 份（part1~4），每人約 457 張
+- 每份包含獨立的 images/ + labels/，搭配 label_editor.py 使用
+- 審核完畢後收回 labels 到 `datasets/reviewed/labels/` 統一管理
+- 建立 `datasets/reviewed/` 作為最終乾淨資料集（取代 merged/）
+
+**Windows 訓練腳本注意事項：**
+- 必須有 `if __name__ == "__main__"` 保護（Windows multiprocessing spawn）
+- `workers=0` 避免 DataLoader spawn 問題
+- 使用相對路徑避免跨機器磁碟代號不同
+
+### 選擇理由
+- 本地訓練消除了 Colab 上傳/同步的摩擦，訓練-部署-測試循環更快
+- `datasets/reviewed/` 獨立目錄避免與 merged/ 混淆，明確標記為「已審核」版本
+- 4 人分工 + 最終確認的二階段審核確保標註品質
+
+---
+
+## 2026-03-11 (#4): 審核標註未同步問題 — 多機分工的資料一致性風險
+
+### 問題
+重建 merged 資料集時發現，okok/bcvi/tuis 三個賽事在 merged 中使用的是 Gemini 原始未校正標註，而非人工審核修正後的版本。
+
+### 發現
+
+**根因 — 多機分工的同步斷層：**
+- 標註分工：本機審核 cosp, mndu, okok 前半；另一台筆電（E: 隨身碟）審核 okok 後半, bcvi, tuis
+- `merge_datasets.py` 合併時讀取 D: 本機的 `labels_raw/`
+- 另一台筆電的審核修正只存在 E: 隨身碟（`E:/scoring-analyzer-deploy/datasets/`），從未同步回 D:
+- 結果：merged dataset 中 okok/bcvi/tuis 三個賽事（~655 張）用的是 Gemini 未校正標註
+
+**影響量化：**
+- 重建後 merged 從 1865 張減少到 1826 張（少 39 張）
+- 這 39 張是審核時發現完全無效而刪除標註的圖片（空 label 被 merge 時過濾）
+- 其餘 ~616 張的 bbox 修正（移動/刪除/新增）也都未反映在之前的訓練中
+
+**壞幀問題：**
+- `detect_bad_frames.py` 另外偵測到 9 張異常幀：比賽結束白霧/紙花畫面、計分板、過曝場景
+- 這些幀帶有大量假標註（Gemini 在非正常比賽畫面上產生的錯誤 bbox）
+- 從 train split 移除避免模型學到錯誤樣本
+
+### 解決方案
+1. 從 E: 隨身碟複製 okok/bcvi/tuis 審核過的 `labels_raw/` 回 D: 本機
+2. 用 `detect_bad_frames.py` 掃描並移除 9 張壞幀
+3. 重跑 `merge_datasets.py` 重建乾淨的 merged 資料集
+4. 用 `label_editor` 最終審核 train+val split 確認品質
+5. 重新訓練並部署模型
+
+### 選擇理由
+- 完整重建而非 patch：因為無法確定哪些檔案受影響，完整重建 merged 最安全
+- 壞幀用腳本偵測而非人工逐張檢查：1800+ 張圖片人工檢查不實際，用統計指標（label 數量異常+亮度分布）自動篩選更高效
+
+### 預防措施
+- 多機分工後**必須**先同步標註回主機再合併
+- `merge_datasets.py` 可考慮加入標註 hash 比對，偵測來源目錄與預期不一致的情況
+- 訓練前用 `detect_bad_frames.py` 掃一遍 merged 作為品質關卡
+
+---
+
+## 2026-03-11 (#3): 效能優化實作 — 非同步 Tiled 偵測 + 直方圖降頻 + 軌跡索引
+
+### 問題
+效能優化 6 步計劃已批准，需實作各項優化。
+
+### 發現
+
+**Step 1 — 軌跡幀索引：**
+- `_draw_analysis_overlay_impl` 每幀遍歷全部 `_all_trajectories`（~2000 球位置），但只有 ~200 個在當前幀附近
+- 預建 `_trajectory_by_frame: dict[int, list]` 索引後，overlay 繪製和 debug 4-panel 都直接查表，無需遍歷
+
+**Step 2 — Tiled 偵測非同步化：**
+- Tiled 偵測（4 tiles x YOLO 推理）造成 ~100ms 尖峰，是分析管線最大瓶頸
+- 使用 `ThreadPoolExecutor(1)` 將 tiled 偵測移至背景執行緒，主執行緒繼續處理下一幀
+- 下一幀消費上一幀的 tiled 結果（`Future.result()`），合併進當前偵測
+- 因為 tiled 偵測本身就是補充偵測（補漏），延遲 1 幀使用不影響追蹤品質
+
+**Step 3 — 直方圖降頻：**
+- 原先每幀對每個偵測都提取 HSV 16x16 直方圖（5-6ms/幀），但直方圖變化緩慢
+- 新增 `MOT_HISTOGRAM_UPDATE_INTERVAL=3`，只在新 label 首次出現或每 3 幀才更新
+- 舊的直方圖仍可用於 Re-ID 匹配，準確度影響極小
+
+**Step 5 — ImageTk 跳過原因：**
+- `PIL.Image.frombuffer` 路徑理論上可避免記憶體複製，但中文標籤需要 PIL `ImageDraw.text()` 渲染
+- 已有的 PIL 路徑無法繞過，故跳過此步
+
+### 選擇理由
+- **非同步 tiled（延遲 1 幀）vs 同步 tiled**: 延遲 1 幀的補充偵測對追蹤準確度影響可忽略（tiled 本身就是補漏機制），但消除了最大的效能尖峰
+- **直方圖降頻 3 幀 vs 5 幀**: 3 幀是保守選擇，確保快速移動的機器人外觀變化不會累積太多
+- **進度更新 20 幀 vs 10 幀**: 20 幀在 30fps 下約 0.67 秒更新一次，使用者感知差異極小
+
+---
+
+## 2026-03-11 (#2): 效能優化深度分析 — 瓶頸定位與加速策略
+
+### 問題
+應用播放和分析管線效能不足，需要系統性定位瓶頸並制定優化計劃。
+
+### 發現
+
+**播放管線瓶頸分布（每幀 25-40ms）：**
+- `cv2.resize` (LANCZOS4): 3-5ms（暫停時高品質）
+- `cv2.putText` overlay: 2-3ms
+- `ImageTk.PhotoImage` 轉換: 3-8ms（解析度相關）
+- 軌跡繪製 O(n) 掃描: 線性增長，2000 球位置時 5-10ms
+- Debug 4-Panel: 80-150ms（4x resize + 4x overlay + compositing）
+
+**分析管線瓶頸分布（每幀 13-16ms，Tiled 幀 116ms）：**
+- YOLO ONNX 推理（全幀）: 8-12ms（DirectML）
+- Tiled 偵測（4 tiles）: ~100ms（4x 推理 + merge + NMS）→ 超標 3.5x
+- 顏色直方圖提取: 5-6ms/幀（每幀對每個偵測提取 HSV 直方圖）
+- 背景遮罩計算: 3-5ms/幀
+
+**GPU 加速潛力：**
+- DirectML: 現有方案，可提速 3-5x（vs CPU）
+- CUDA (onnxruntime-gpu): 可提速 8-12x，但需 Python <3.13
+- OpenCL UMat: 已用於 HSV 球偵測，但機器人偵測未使用
+
+### 解決方案（6 步優化計劃）
+1. 軌跡幀索引：建立 frame→ball_positions 索引，O(2000)→O(~200) 查詢
+2. Tiled 偵測非同步化：將 4-tile 推理移到背景執行緒，消除 100ms 尖峰
+3. 直方圖提取降頻：每 N 幀提取一次而非每幀，5-6ms→1-2ms 均攤
+4. 背景遮罩快取：Debug 視圖快取前景遮罩，避免重複計算
+5. ImageTk 轉換優化：使用 PIL.Image.frombuffer 避免記憶體複製
+6. 進度更新降頻：UI 進度條每 N 幀更新一次而非每幀
+
+### 選擇理由
+- 優先解決最大瓶頸（Tiled 偵測 100ms）而非微優化
+- 非同步化不改變偵測邏輯，只改變執行時序
+- 降頻策略在品質損失可忽略的前提下大幅減少計算量
+
+---
+
+## 2026-03-11: YOLOv26n 本地 GPU 訓練結果 + ONNX 匯出 imgsz 陷阱
+
+### 問題
+1. 需要在本地 RTX 3070Ti Laptop GPU 訓練 YOLOv26n 模型（之前在 Colab T4 訓練）
+2. 匯出 ONNX 後模型偵測結果全為 0
+
+### 發現
+
+**本地 GPU 訓練結果（RTX 3070Ti Laptop, 100 epochs）：**
+- 資料集：merged 1865 張（2024mslr 817 + 5×2026 regional 1048），train=1492, val=373
+- mAP50=0.841, mAP50-95=0.463, Precision=0.853, Recall=0.780
+- 訓練時間：約 40 分鐘（vs Colab T4 ~12 分鐘/50 epochs）
+- 較之前 Colab 訓練（817張, mAP50=0.903）mAP50 略低，因為新增的 2026 賽事場地更多樣化
+
+**ONNX 匯出 imgsz 陷阱（致命 bug）：**
+- `model.export(format="onnx")` 不指定 `imgsz` 時，ultralytics **不一定使用訓練時的 640**
+- 本次匯出時 ultralytics 預設 imgsz=64（極小），模型輸入 64x64 → 偵測結果全為 0
+- 必須明確指定 `model.export(format="onnx", imgsz=640)` 才能正確匯出
+- NMS-Free 輸出格式：[1, 300, 6]（x1, y1, x2, y2, score, class），300 為 max_det
+
+**本地 vs Colab 訓練比較：**
+- RTX 3070Ti Laptop (8GB VRAM): batch_size=16, ~24s/epoch
+- Colab T4 (15GB VRAM): batch_size=16, ~14s/epoch
+- 本地優勢：無 GPU 額度限制、無需上傳資料、可直接部署
+- Colab 優勢：免費、更大 VRAM
+
+### 選擇理由
+- 本地訓練避免 Colab GPU 額度限制（之前已遇到額度耗盡問題）
+- 100 epochs（vs 之前 50 epochs）因資料集增大 2.3x，需要更多訓練輪次
+- imgsz=640 必須在匯出時明確指定，不能依賴 ultralytics 預設值
+
+---
+
 ## 2026-03-10 (#3): FRC 同賽事影片多解析度問題 + Gemini 504 空檔問題
 
 ### 問題

@@ -21,7 +21,6 @@ from config import (
     ROBOT_COLORS, ROBOT_COLORS_HEX, AUTO_DURATION_SEC, DETECTION_MODE,
     ROBOT_DETECTION_MODE,
 )
-from background import BackgroundModel
 from detection import (detect_yellow_balls, detect_fuel_ai, load_ai_model,
                        reset_diagnostics)
 from tracking import CentroidTracker, stitch_trajectories
@@ -31,6 +30,14 @@ from scoring import ScoringEngine, ScoringZone
 from runtime_config import RuntimeConfig
 from settings_window import SettingsPanel
 from utils import load_font, format_time
+from dataclasses import dataclass
+
+
+@dataclass
+class OcclusionZone:
+    """遮擋區域定義（多邊形）。"""
+    name: str
+    polygon: list[tuple[int, int]]
 
 
 class ScoringAnalyzer(ctk.CTk):
@@ -89,7 +96,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._display_offset_y = 0
 
         # 互動模式
-        self.interaction_mode = None  # None, "bumper_pick", "mark_zone_polygon", "mark_hp_line"
+        self.interaction_mode = None  # None, "bumper_pick", "mark_zone_polygon", "mark_hp_line", "mark_occlusion_zone"
         self._drag_start = None      # 拖曳起始點（影片座標）
         self._drag_current = None    # 拖曳當前點
         self._polygon_points = []    # 多邊形標記中的頂點列表
@@ -117,6 +124,7 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 機器人追蹤
         self.robot_manager = RobotTrackerManager()
+        self._analysis_robot_mgr = None  # 分析後的 RobotTrackerManager 引用
         self._robot_markers = []  # [(label, alliance, x, y, w, h, frame_idx)]
 
         # Bumper 取色模板
@@ -125,6 +133,7 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 得分區域
         self._scoring_zones = []  # [ScoringZone, ...]
+        self._occlusion_zones = []  # [OcclusionZone, ...]
 
         # 偵測模式
         self._detection_mode = DETECTION_MODE  # "AI" or "HSV"
@@ -144,6 +153,7 @@ class ScoringAnalyzer(ctk.CTk):
 
         # 分析結果快取
         self._all_trajectories = {}
+        self._trajectory_by_frame: dict[int, list[tuple]] = {}  # 軌跡幀索引
         self._frame_detections = {}
         self._robot_positions_cache = {}  # frame_idx -> {label: (cx, cy)}
         self._robot_bboxes_cache = {}     # frame_idx -> {label: (x1, y1, x2, y2)}
@@ -355,6 +365,20 @@ class ScoringAnalyzer(ctk.CTk):
                       font=ctk.CTkFont(size=14)).pack(
             side=tk.LEFT, padx=4)
 
+        self.mark_occlusion_btn = ctk.CTkButton(
+            toolbar_row1, text="遮擋區域", height=30, corner_radius=8,
+            fg_color="#4b5563", hover_color="#6b7280",
+            text_color="white",
+            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
+            command=self._start_mark_occlusion_zone)
+        self.mark_occlusion_btn.pack(side=tk.LEFT, padx=3, pady=4)
+
+        # 分隔
+        ctk.CTkLabel(toolbar_row1, text="|",
+                      text_color=COLORS["border"],
+                      font=ctk.CTkFont(size=14)).pack(
+            side=tk.LEFT, padx=4)
+
         self.clear_marks_btn = ctk.CTkButton(
             toolbar_row1, text="清除標記", height=30, corner_radius=8,
             fg_color=COLORS["border"], hover_color=COLORS["border_hover"],
@@ -423,7 +447,9 @@ class ScoringAnalyzer(ctk.CTk):
             config=self._runtime_config,
             get_current_frame=self._get_current_frame_for_preview,
             on_config_changed=self._on_settings_changed,
-            start_color_pick=self._start_color_pick)
+            start_color_pick=self._start_color_pick,
+            get_analysis_data=self._get_analysis_data_for_preview,
+            on_recompute_attribution=self._on_recompute_attribution)
         self._settings_panel.grid(row=0, column=0, sticky="nsew")
 
         # ════════════════════════════════════════════
@@ -551,6 +577,31 @@ class ScoringAnalyzer(ctk.CTk):
     def _video_to_resized(self, point, scale):
         return (int((point[0] - self._crop_x) * scale),
                 int((point[1] - self._crop_y) * scale))
+
+    def _draw_dashed_rect(self, img, p1, p2, color, thickness=1,
+                          dash_len=8, gap_len=5):
+        """繪製虛線矩形。"""
+        x1, y1 = p1
+        x2, y2 = p2
+        edges = [
+            ((x1, y1), (x2, y1)),
+            ((x2, y1), (x2, y2)),
+            ((x2, y2), (x1, y2)),
+            ((x1, y2), (x1, y1)),
+        ]
+        for (ex1, ey1), (ex2, ey2) in edges:
+            length = math.hypot(ex2 - ex1, ey2 - ey1)
+            if length == 0:
+                continue
+            dx = (ex2 - ex1) / length
+            dy = (ey2 - ey1) / length
+            pos = 0.0
+            while pos < length:
+                start = (int(ex1 + dx * pos), int(ey1 + dy * pos))
+                end_pos = min(pos + dash_len, length)
+                end = (int(ex1 + dx * end_pos), int(ey1 + dy * end_pos))
+                cv2.line(img, start, end, color, thickness, cv2.LINE_AA)
+                pos += dash_len + gap_len
 
     # ══════════════════════════════════════════════════════
     # 縮放/平移
@@ -831,6 +882,17 @@ class ScoringAnalyzer(ctk.CTk):
             cv2.circle(resized, p1, 5, hp_color, -1, cv2.LINE_AA)
             cv2.circle(resized, p2, 5, hp_color, -1, cv2.LINE_AA)
 
+        # 繪製遮擋區域（半透明灰色）
+        for oz in self._occlusion_zones:
+            pts = [self._video_to_resized(p, scale) for p in oz.polygon]
+            pts_np = np.array(pts, dtype=np.int32)
+            overlay = resized.copy()
+            cv2.fillPoly(overlay, [pts_np], (80, 80, 80))
+            cv2.addWeighted(overlay, 0.3, resized, 0.7, 0, resized)
+            cv2.polylines(resized, [pts_np], isClosed=True,
+                          color=(128, 128, 128), thickness=1,
+                          lineType=cv2.LINE_AA)
+
         # 繪製 HP 標記進行中的第一個點
         if self.interaction_mode == "mark_hp_line" and self._hp_line_first_point:
             pt = self._video_to_resized(self._hp_line_first_point, scale)
@@ -873,6 +935,19 @@ class ScoringAnalyzer(ctk.CTk):
                 poly_color = ALLIANCE_COLORS[self._current_polygon_alliance]["bgr"]
             else:
                 poly_color = (200, 100, 255)
+            pts = [self._video_to_resized(p, scale)
+                   for p in self._polygon_points]
+            for pt in pts:
+                cv2.circle(resized, pt, 5, poly_color, -1, cv2.LINE_AA)
+            if len(pts) >= 2:
+                pts_np = np.array(pts, dtype=np.int32)
+                cv2.polylines(resized, [pts_np], isClosed=False,
+                              color=poly_color, thickness=2,
+                              lineType=cv2.LINE_AA)
+
+        # 繪製遮擋區域標記中的頂點和連線（灰色）
+        if self.interaction_mode == "mark_occlusion_zone" and self._polygon_points:
+            poly_color = (128, 128, 128)
             pts = [self._video_to_resized(p, scale)
                    for p in self._polygon_points]
             for pt in pts:
@@ -1017,6 +1092,17 @@ class ScoringAnalyzer(ctk.CTk):
                 hp_color = (200, 200, 0)
             cv2.line(resized, p1, p2, hp_color, 3, cv2.LINE_AA)
 
+        # 遮擋區域（半透明灰色）
+        for oz in self._occlusion_zones:
+            pts = [self._video_to_resized(p, scale) for p in oz.polygon]
+            pts_np = np.array(pts, dtype=np.int32)
+            overlay = resized.copy()
+            cv2.fillPoly(overlay, [pts_np], (80, 80, 80))
+            cv2.addWeighted(overlay, 0.3, resized, 0.7, 0, resized)
+            cv2.polylines(resized, [pts_np], isClosed=True,
+                          color=(128, 128, 128), thickness=1,
+                          lineType=cv2.LINE_AA)
+
         # 分析 overlay（球偵測、軌跡、機器人框）
         if self._analysis_done:
             self._draw_analysis_overlay(resized, frame_idx, scale)
@@ -1067,12 +1153,21 @@ class ScoringAnalyzer(ctk.CTk):
                 cv2.circle(resized, pt, radius, (36, 191, 251), 2,
                            cv2.LINE_AA)
 
-        # 球軌跡
-        for tid, traj in self._all_trajectories.items():
-            points = [p for p in traj if abs(p[0] - frame_idx) <= 20]
+        # 球軌跡（使用幀索引加速查詢）
+        traj_points: dict[int, list[tuple]] = {}  # tid -> [(f, cx, cy), ...]
+        for f in range(frame_idx - 20, frame_idx + 21):
+            entries = self._trajectory_by_frame.get(f)
+            if entries:
+                for tid, cx, cy in entries:
+                    if tid in traj_points:
+                        traj_points[tid].append((f, cx, cy))
+                    else:
+                        traj_points[tid] = [(f, cx, cy)]
+        color = (0, 200, 200)
+        for tid, points in traj_points.items():
             if len(points) < 2:
                 continue
-            color = (0, 200, 200)
+            points.sort(key=lambda p: p[0])
             for i in range(len(points) - 1):
                 p1 = self._video_to_resized((points[i][1], points[i][2]),
                                             scale)
@@ -1121,6 +1216,36 @@ class ScoringAnalyzer(ctk.CTk):
                                color["bgr"], -1, cv2.LINE_AA)
                     cv2.circle(resized, pt, 14 if is_detected else 10,
                                border_color, thickness, cv2.LINE_AA)
+
+        # LOST 機器人：虛線框在最後已知位置
+        if hasattr(self, '_analysis_robot_mgr') and self._analysis_robot_mgr:
+            tracker = self._analysis_robot_mgr
+            if hasattr(tracker, '_impl') and hasattr(tracker._impl, '_track_state'):
+                impl = tracker._impl
+                for label, state in impl._track_state.items():
+                    if state != "lost":
+                        continue
+                    cur_robots = self._robot_positions_cache.get(frame_idx) or {}
+                    if label in cur_robots:
+                        continue
+                    lk = impl._last_known.get(label)
+                    if not lk:
+                        continue
+                    color = self._get_robot_color(label)
+                    bbox_list = impl._bboxes.get(label, [])
+                    if bbox_list:
+                        x1, y1, x2, y2 = (bbox_list[-1][1], bbox_list[-1][2],
+                                           bbox_list[-1][3], bbox_list[-1][4])
+                        p1 = self._video_to_resized((x1, y1), scale)
+                        p2 = self._video_to_resized((x2, y2), scale)
+                        self._draw_dashed_rect(
+                            resized, p1, p2, color["bgr"], thickness=1)
+                    else:
+                        last_cx, last_cy = lk[1], lk[2]
+                        pt = self._video_to_resized(
+                            (last_cx, last_cy), scale)
+                        cv2.circle(resized, pt, 8,
+                                   (128, 128, 128), 1, cv2.LINE_AA)
 
         # 進球事件標記
         for event in self.scoring_engine.events:
@@ -1171,6 +1296,26 @@ class ScoringAnalyzer(ctk.CTk):
                 draw.text((pt[0], max(0, pt[1] - 16)), label,
                           fill=color["rgb"], font=self._label_font)
 
+        # LOST 機器人標籤（灰色）
+        if hasattr(self, '_analysis_robot_mgr') and self._analysis_robot_mgr:
+            tracker = self._analysis_robot_mgr
+            if hasattr(tracker, '_impl') and hasattr(tracker._impl, '_track_state'):
+                impl = tracker._impl
+                for label, state in impl._track_state.items():
+                    if state != "lost":
+                        continue
+                    cur_robots = self._robot_positions_cache.get(frame_idx) or {}
+                    if label in cur_robots:
+                        continue
+                    lk = impl._last_known.get(label)
+                    if not lk:
+                        continue
+                    last_cx, last_cy = lk[1], lk[2]
+                    pt = self._video_to_resized((last_cx, last_cy - 15), scale)
+                    draw.text((pt[0], max(0, pt[1] - 16)),
+                              f"{label} [LOST]",
+                              fill=(128, 128, 128), font=self._label_font)
+
         # 進球事件文字
         for event in self.scoring_engine.events:
             if event.frame_idx == frame_idx:
@@ -1212,41 +1357,45 @@ class ScoringAnalyzer(ctk.CTk):
         # 共用縮放
         small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_LINEAR)
 
-        # ── 左上：前景遮罩（背景模型）+ 機器人位置圓點 ──
-        if self._bg_model and self._bg_model.background_image is not None:
-            fg_mask = self._bg_model.get_foreground_mask(frame)
-            fg_small = cv2.resize(fg_mask, (sw, sh),
-                                  interpolation=cv2.INTER_LINEAR)
-            panel_tl = cv2.cvtColor(fg_small, cv2.COLOR_GRAY2BGR)
-        else:
-            panel_tl = cv2.cvtColor(
-                cv2.cvtColor(small, cv2.COLOR_BGR2GRAY),
-                cv2.COLOR_GRAY2BGR)
+        # ── 左上：灰階 + 機器人位置圓點 ──
+        panel_tl = cv2.cvtColor(
+            cv2.cvtColor(small, cv2.COLOR_BGR2GRAY),
+            cv2.COLOR_GRAY2BGR)
         if frame_idx in self._robot_positions_cache:
             for label, pos in self._robot_positions_cache[frame_idx].items():
                 pt = (int(pos[0] * scale), int(pos[1] * scale))
                 color = self._get_robot_color(label)
                 cv2.circle(panel_tl, pt, 6, color["bgr"], -1, cv2.LINE_AA)
-        cv2.putText(panel_tl, "FG Mask", (4, 16),
+        cv2.putText(panel_tl, "Grayscale", (4, 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
         # ── 右上：球軌跡 + ownership 著色 ──
         panel_tr = np.zeros((sh, sw, 3), dtype=np.uint8)
-        for tid, traj in self._all_trajectories.items():
-            pts_list = sorted(traj, key=lambda p: p[0])
-            if len(pts_list) < 2:
-                continue
-            # 取 ownership 的主要 owner 來著色
-            owner_color = (0, 200, 200)  # 預設青色
+        # 預先計算每個 tid 的 owner 顏色
+        tid_colors: dict[int, tuple] = {}
+        from collections import Counter
+        for tid in self._all_trajectories:
             ownership = self.scoring_engine._ball_ownership.get(tid, {})
             if ownership:
-                # 用最常出現的 owner 著色
-                from collections import Counter
                 most_common = Counter(ownership.values()).most_common(1)
                 if most_common:
-                    owner_label = most_common[0][0]
-                    c = self._get_robot_color(owner_label)
-                    owner_color = c["bgr"]
+                    c = self._get_robot_color(most_common[0][0])
+                    tid_colors[tid] = c["bgr"]
+        # 收集可見軌跡點
+        debug_traj: dict[int, list[tuple]] = {}
+        for f in range(frame_idx - 60, frame_idx + 61):
+            entries = self._trajectory_by_frame.get(f)
+            if entries:
+                for tid, cx, cy in entries:
+                    if tid in debug_traj:
+                        debug_traj[tid].append((f, cx, cy))
+                    else:
+                        debug_traj[tid] = [(f, cx, cy)]
+        for tid, pts_list in debug_traj.items():
+            if len(pts_list) < 2:
+                continue
+            pts_list.sort(key=lambda p: p[0])
+            owner_color = tid_colors.get(tid, (0, 200, 200))
             for i in range(len(pts_list) - 1):
                 p1 = (int(pts_list[i][1] * scale),
                       int(pts_list[i][2] * scale))
@@ -1477,6 +1626,19 @@ class ScoringAnalyzer(ctk.CTk):
             COLORS["accent"])
         self.canvas.config(cursor="crosshair")
 
+    def _start_mark_occlusion_zone(self):
+        """開始標記遮擋區域多邊形。"""
+        if not self.cap:
+            self._set_status("請先開啟影片", COLORS["error"])
+            return
+        self.interaction_mode = "mark_occlusion_zone"
+        self._polygon_points = []
+        self.canvas.config(cursor="crosshair")
+        self._set_status(
+            "標記遮擋區域 — 左鍵點擊放置頂點，"
+            "右鍵或雙擊完成多邊形（至少 3 點），ESC 取消",
+            COLORS["info"])
+
     def _cancel_interaction(self):
         if self.interaction_mode:
             if self.interaction_mode == "color_pick":
@@ -1625,6 +1787,15 @@ class ScoringAnalyzer(ctk.CTk):
                 self._finish_mark_hp_line(pt)
             return
 
+        if self.interaction_mode == "mark_occlusion_zone":
+            self._polygon_points.append((int(vx), int(vy)))
+            n = len(self._polygon_points)
+            self._set_status(
+                f"已放置 {n} 個頂點 — 右鍵或雙擊完成（至少 3 點），ESC 取消",
+                COLORS["info"])
+            self._show_frame(self.current_frame)
+            return
+
         # 機器人框選拖曳
         self._drag_start = (vx, vy)
         self._drag_current = (vx, vy)
@@ -1639,7 +1810,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._show_frame(self.current_frame)
 
     def _on_canvas_release(self, event):
-        if self.interaction_mode in ("bumper_pick", "mark_zone_polygon", "mark_hp_line"):
+        if self.interaction_mode in ("bumper_pick", "mark_zone_polygon", "mark_hp_line", "mark_occlusion_zone"):
             return  # 這些模式由點擊/右鍵/雙擊完成
 
         if not self._drag_start or not self._drag_current:
@@ -1669,6 +1840,8 @@ class ScoringAnalyzer(ctk.CTk):
         """雙擊完成多邊形標記。"""
         if self.interaction_mode == "mark_zone_polygon":
             self._finish_mark_polygon()
+        if self.interaction_mode == "mark_occlusion_zone":
+            self._finish_mark_occlusion_zone()
 
     def _on_canvas_right_click(self, event):
         """右鍵完成多邊形標記 / bumper 取色完成 / HSV 取色完成。"""
@@ -1693,6 +1866,11 @@ class ScoringAnalyzer(ctk.CTk):
 
         if self.interaction_mode == "mark_zone_polygon":
             self._finish_mark_polygon()
+            return
+
+        if self.interaction_mode == "mark_occlusion_zone":
+            self._finish_mark_occlusion_zone()
+            return
 
     def _finish_mark_polygon(self):
         """完成 Hub 多邊形標記。"""
@@ -1722,6 +1900,23 @@ class ScoringAnalyzer(ctk.CTk):
         self._current_polygon_alliance = ""
         self.canvas.config(cursor="")
         self._set_status(f"已設定 {zone_name} 區域", COLORS["success"])
+        self._show_frame(self.current_frame)
+
+    def _finish_mark_occlusion_zone(self):
+        """完成遮擋區域多邊形標記。"""
+        if len(self._polygon_points) < 3:
+            self._set_status("至少需要 3 個頂點才能完成多邊形", COLORS["error"])
+            return
+
+        zone_name = f"遮擋區域 {len(self._occlusion_zones) + 1}"
+        zone = OcclusionZone(zone_name, list(self._polygon_points))
+        self._occlusion_zones.append(zone)
+        self._update_zone_list()
+
+        self.interaction_mode = None
+        self._polygon_points = []
+        self.canvas.config(cursor="")
+        self._set_status(f"已設定 {zone_name}", COLORS["success"])
         self._show_frame(self.current_frame)
 
     def _finish_mark_hp_line(self, second_point):
@@ -1864,6 +2059,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._bumper_pick_points = []
         self._scoring_zones.clear()
         self._hp_lines.clear()
+        self._occlusion_zones.clear()
         self._hp_line_first_point = None
         self._hp_line_alliance = ""
         self._drag_start = None
@@ -1896,6 +2092,8 @@ class ScoringAnalyzer(ctk.CTk):
             lines.append(f"  {zone.name} ({len(zone.points)} 頂點)")
         for hp in self._hp_lines:
             lines.append(f"  {hp['name']} (線段)")
+        for oz in self._occlusion_zones:
+            lines.append(f"  {oz.name} ({len(oz.polygon)} 頂點) [遮擋]")
         if not lines:
             self.zone_list_label.configure(text="（無）")
         else:
@@ -2014,6 +2212,9 @@ class ScoringAnalyzer(ctk.CTk):
         # MOT 永遠使用距離匹配（ByteTrack IoU 在 FRC 場景失效）
         if robot_mgr.use_mot:
             robot_mgr.enable_auto_mode()
+            if self._occlusion_zones:
+                robot_mgr.set_occlusion_zones(self._occlusion_zones)
+                print(f"[INFO] MOT 已設定 {len(self._occlusion_zones)} 個遮擋區域")
             print("[INFO] MOT 距離匹配模式（自動偵測所有機器人）")
 
         # 初始化進球引擎
@@ -2026,7 +2227,9 @@ class ScoringAnalyzer(ctk.CTk):
             zone_dwell_frames=cfg.score_zone_dwell_frames,
             cooldown_frames=cfg.score_cooldown_frames,
             shot_min_velocity=cfg.shot_min_velocity,
+            shot_min_upward_velocity=cfg.shot_min_upward_velocity,
             shot_robot_proximity=cfg.shot_robot_proximity,
+            ball_ownership_dist=cfg.ball_ownership_dist,
         )
         engine.set_zones(self._scoring_zones)
         engine.hp_lines = list(self._hp_lines)
@@ -2077,44 +2280,50 @@ class ScoringAnalyzer(ctk.CTk):
         total_ball_dets = 0
         total_robot_dets = 0
 
-        # 建立背景模型（Temporal Median）
-        bg_model = BackgroundModel(
-            fg_threshold=cfg.bg_fg_threshold,
-            dilate_kernel=cfg.bg_dilate_kernel)
-        self.after(0, lambda: self._set_status(
-            "正在建立背景模型…", COLORS["info"]))
-        bg_model.build(cap, roi=roi, sample_count=cfg.bg_sample_count)
-        self._bg_model = bg_model
+        self._bg_model = None
 
-        # 逐幀處理（球偵測 CPU + 機器人偵測 GPU 並行）
-        pool = ThreadPoolExecutor(max_workers=2)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        for frame_idx in range(total):
-            ret, frame = cap.read()
-            if not ret:
+        # ═══ Pipeline 分析：偵測提前執行，追蹤依序消費 ═══
+        # Producer 線程：讀幀 + 球偵測 + 機器人偵測（提前 N 幀）
+        # Consumer（本線程）：追蹤匹配 + 進球判定（必須依序）
+        import queue as _queue
+        det_queue = _queue.Queue(maxsize=8)
+
+        def _detection_producer():
+            """背景線程：讀幀 + 所有偵測，結果排入佇列。"""
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            for fidx in range(total):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if roi:
+                    rx, ry, rw, rh = roi
+                    frame = frame[ry:ry+rh, rx:rx+rw]
+                ball_dets = detect_balls(frame)
+                robot_raw = robot_mgr.detect_raw(frame, fidx)
+                det_queue.put((fidx, frame, ball_dets, robot_raw))
+            det_queue.put(None)  # sentinel
+
+        producer = threading.Thread(
+            target=_detection_producer, daemon=True)
+        producer.start()
+
+        # Consumer：依序追蹤 + 進球判定
+        while True:
+            item = det_queue.get()
+            if item is None:
                 break
-
-            # ROI 裁切
-            if roi:
-                rx, ry, rw, rh = roi
-                frame = frame[ry:ry+rh, rx:rx+rw]
-
-            # 背景模型前景遮罩：只用於球偵測（機器人偵測用原始 frame）
-            fg_mask = bg_model.get_foreground_mask(frame)
-            frame_masked = cv2.bitwise_and(frame, frame, mask=fg_mask)
+            frame_idx, frame, dets, robot_raw = item
 
             # SOT 模式：在標記幀初始化追蹤器（需要影像）
             if not robot_mgr.use_mot and frame_idx in markers_by_frame:
-                for label, alliance, x, y, w, h in markers_by_frame[frame_idx]:
+                for label, alliance, x, y, w, h in \
+                        markers_by_frame[frame_idx]:
                     robot_mgr.add_robot(
-                        label, (x, y, w, h), frame, frame_idx, alliance)
+                        label, (x, y, w, h), frame, frame_idx,
+                        alliance)
 
-            # 球偵測 (CPU) + 機器人偵測 (GPU) 並行
-            ball_future = pool.submit(detect_balls, frame_masked)
-            robot_future = pool.submit(
-                robot_mgr.update_all, frame, frame_idx)
-            dets = ball_future.result()
-            robot_future.result()
+            # 追蹤更新（必須依序執行）
+            robot_mgr.track_update(robot_raw, frame_idx, frame)
 
             frame_detections[frame_idx] = dets
             total_ball_dets += len(dets)
@@ -2137,13 +2346,13 @@ class ScoringAnalyzer(ctk.CTk):
                       f"球偵測 {total_ball_dets} 個, "
                       f"機器人偵測 {total_robot_dets} 個")
 
-            # 更新進度
-            if frame_idx % 5 == 0:
+            # 更新進度（每 20 幀）
+            if frame_idx % 20 == 0:
                 pct = (frame_idx + 1) / total * 100
                 self.after(0, lambda p=pct, f=frame_idx, m=mode_label:
                            self._update_progress(p, f, m))
 
-        pool.shutdown(wait=False)
+        producer.join()
         cap.release()
 
         print(f"[INFO] 分析完成: 共 {total} 幀, "
@@ -2210,7 +2419,7 @@ class ScoringAnalyzer(ctk.CTk):
         self.after(0, lambda: self._finish_analysis(
             all_trajectories, frame_detections,
             robot_positions_cache, robot_bboxes_cache, engine,
-            auto_robots, detected_frames
+            auto_robots, detected_frames, robot_mgr
         ))
 
     def _update_progress(self, pct, frame_idx, mode=""):
@@ -2229,9 +2438,12 @@ class ScoringAnalyzer(ctk.CTk):
 
     def _finish_analysis(self, trajectories, frame_dets,
                          robot_cache, robot_bbox_cache, engine,
-                         auto_robots=None, detected_frames=None):
+                         auto_robots=None, detected_frames=None,
+                         robot_mgr=None):
         """分析完成，更新 UI。"""
+        self._analysis_robot_mgr = robot_mgr
         self._all_trajectories = trajectories
+        self._build_trajectory_index(trajectories)
         self._frame_detections = frame_dets
         self._robot_positions_cache = robot_cache
         self._robot_bboxes_cache = robot_bbox_cache
@@ -2281,10 +2493,25 @@ class ScoringAnalyzer(ctk.CTk):
 
         self._show_frame(self.current_frame)
 
+    def _build_trajectory_index(self, trajectories: dict):
+        """從軌跡資料預建幀索引，加速播放渲染時的軌跡查詢。"""
+        index: dict[int, list[tuple]] = {}
+        for tid, traj in trajectories.items():
+            for point in traj:
+                f = point[0]
+                entry = (tid, point[1], point[2])  # (tid, cx, cy)
+                if f in index:
+                    index[f].append(entry)
+                else:
+                    index[f] = [entry]
+        self._trajectory_by_frame = index
+
     def _clear_analysis(self):
         """清除分析結果。"""
         self._analysis_done = False
+        self._analysis_robot_mgr = None
         self._all_trajectories.clear()
+        self._trajectory_by_frame.clear()
         self._frame_detections.clear()
         self._robot_positions_cache.clear()
         self._robot_bboxes_cache.clear()
@@ -2471,6 +2698,77 @@ class ScoringAnalyzer(ctk.CTk):
     def _get_current_frame_for_preview(self):
         """提供當前播放幀給設定視窗預覽。"""
         return self._get_current_frame()
+
+    def _get_analysis_data_for_preview(self):
+        """提供當前幀的分析資料給設定面板預覽。"""
+        if not self._analysis_done:
+            return None
+        f = self.current_frame
+        return {
+            "frame_idx": f,
+            "ball_detections": self._frame_detections.get(f, []),
+            "robot_positions": self._robot_positions_cache.get(f, {}),
+            "trajectories": self._all_trajectories,
+            "ball_ownership": self.scoring_engine._ball_ownership,
+        }
+
+    def _on_recompute_attribution(self):
+        """用當前 RuntimeConfig 參數重新計算歸因。"""
+        if not self._analysis_done:
+            return
+        cfg = self._runtime_config
+        engine = self.scoring_engine
+        # 更新引擎參數
+        engine._ownership_dist = cfg.ball_ownership_dist
+        engine._shot_min_velocity = cfg.shot_min_velocity
+        engine._shot_min_upward_velocity = cfg.shot_min_upward_velocity
+        engine._shot_robot_proximity = cfg.shot_robot_proximity
+        engine._proximity_frames = cfg.score_proximity_frames
+        engine._max_shooter_dist = cfg.score_max_shooter_dist
+        # 重新計算
+        engine.reset()
+        # 從軌跡重建每幀的 ball_positions {track_id: (cx, cy, area)}
+        ball_by_frame: dict[int, dict] = {}
+        for tid, traj in self._all_trajectories.items():
+            for point in traj:
+                f = point[0]
+                if f not in ball_by_frame:
+                    ball_by_frame[f] = {}
+                ball_by_frame[f][tid] = (point[1], point[2],
+                                         point[3] if len(point) > 3 else 0)
+        # 重新跑進球判定
+        for f in sorted(ball_by_frame.keys()):
+            robot_pos = self._robot_positions_cache.get(f, {})
+            engine.process_frame(f, ball_by_frame[f], robot_pos,
+                                 self._all_trajectories)
+        engine.compute_ball_ownership(
+            self._all_trajectories, self._robot_positions_cache)
+        engine.detect_shots(
+            self._all_trajectories, self._robot_positions_cache)
+        engine.reattribute_shooters(
+            self._all_trajectories, self._robot_positions_cache)
+        # 更新 UI
+        self._cumulative_goals = {}
+        running = {}
+        if engine.events:
+            events_sorted = sorted(engine.events, key=lambda e: e.frame_idx)
+            ev_idx = 0
+            for f in range(self.total_frames):
+                while (ev_idx < len(events_sorted)
+                       and events_sorted[ev_idx].frame_idx <= f):
+                    lbl = events_sorted[ev_idx].shooter_label or "未知"
+                    running[lbl] = running.get(lbl, 0) + 1
+                    ev_idx += 1
+                if running:
+                    self._cumulative_goals[f] = dict(running)
+        self._update_score_table()
+        self._update_event_timeline()
+        n_goals = len(engine.events)
+        n_shots = len(engine.shot_events)
+        self._set_status(
+            f"重新計算完成！{n_goals} 進球, {n_shots} 出手",
+            COLORS["success"])
+        self._show_frame(self.current_frame)
 
     def _on_settings_changed(self):
         cfg = self._runtime_config

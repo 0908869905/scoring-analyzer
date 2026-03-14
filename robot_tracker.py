@@ -11,17 +11,23 @@ import os
 import cv2
 import numpy as np
 
+from concurrent.futures import ThreadPoolExecutor
+
 from config import (
     ROBOT_MAX_LOST_FRAMES, ROBOT_TRACKER_TYPE,
     VITTRACK_MODEL_PATH, VITTRACK_SCORE_THRESHOLD,
     BYTETRACK_TRACK_THRESH, BYTETRACK_LOST_BUFFER,
     BYTETRACK_MATCH_THRESH, BYTETRACK_MIN_CONSECUTIVE,
     MOT_DETECT_INTERVAL, MOT_REID_MAX_DIST, MOT_HISTOGRAM_WEIGHT,
-    MOT_REID_MAX_SECONDS, MOT_MIN_TRACK_FRAMES,
+    MOT_HISTOGRAM_UPDATE_INTERVAL,
+    MOT_MIN_TRACK_FRAMES,
+    MOT_MAX_LOST_FRAMES, MOT_OCCLUSION_PATIENCE,
+    MOT_LOST_GRACE_FRAMES, MOT_LOST_REID_DIST_SCALE,
+    MOT_LOST_MIN_HIST_SIM, MOT_OCCLUSION_MARGIN,
     MOT_MERGE_MAX_OVERLAP, MOT_MERGE_BOUNDARY_DIST, MOT_MERGE_SEARCH_WINDOW,
     MOT_STATIC_MAX_VARIANCE, MOT_STATIC_MIN_FRAMES,
 )
-from geometry import rect_center
+from geometry import rect_center, point_in_polygon, min_distance_to_polygon_edge
 
 try:
     import supervision as sv
@@ -90,7 +96,6 @@ class _MOTTracker:
         self._last_known: dict[str, tuple] = {}
         # {label: (frame_idx, cx, cy, class_id, vx, vy)}
         self._reid_max_dist = MOT_REID_MAX_DIST
-        self._reid_max_frames = int(fps * MOT_REID_MAX_SECONDS)
 
         # ── 顏色直方圖 Re-ID ──
         self._histograms: dict[str, np.ndarray] = {}
@@ -101,9 +106,35 @@ class _MOTTracker:
         self._detected_frames: dict[str, set[int]] = {}
         # {label: set of frame indices with actual detections}
 
+        # ── Tiled 偵測非同步化 ──
+        self._tiled_executor = ThreadPoolExecutor(max_workers=1)
+        self._pending_tiled_future = None  # Future for background tiled detection
+
+        # ── 直方圖更新降頻 ──
+        self._hist_update_interval = MOT_HISTOGRAM_UPDATE_INTERVAL
+
+        # ── Track State Machine ──
+        self._track_state: dict[str, str] = {}
+        # {label: "active" | "lost"}
+        self._lost_since: dict[str, int] = {}
+        # {label: frame_idx when LOST started}
+        self._missed_frames: dict[str, int] = {}
+        # {label: consecutive frames without detection}
+
+        # ── 遮擋區域 ──
+        self._occlusion_zones: list = []
+        # list of objects with .polygon attribute
+
+        # ── 靜止標記 ──
+        self._static_labels: set[str] = set()
+
     def enable_auto_mode(self):
         """啟用自動偵測模式（不需用戶標記）。"""
         self._auto_mode = True
+
+    def set_occlusion_zones(self, zones):
+        """設定遮擋區域列表。"""
+        self._occlusion_zones = list(zones)
 
     def add_robot(self, label: str, bbox_xywh: tuple, frame: np.ndarray,
                   frame_idx: int, alliance: str = ""):
@@ -116,21 +147,31 @@ class _MOTTracker:
         self._positions.setdefault(label, [])
         self._bboxes.setdefault(label, [])
 
-    def update_all(self, frame: np.ndarray, frame_idx: int) -> dict:
-        """
-        偵測 + 追蹤所有機器人。
+    # ── Pipeline API: 偵測/追蹤分離（支援 producer-consumer 並行）──
+
+    def detect_raw(self, frame: np.ndarray, frame_idx: int) -> list:
+        """Phase 1: 偵測（無狀態，可在 producer 線程提前執行）。
 
         Returns:
-            {label: (x, y, w, h) or None} — 相容舊 API
+            raw_dets: [(x1, y1, x2, y2, conf, class_id), ...]
         """
-        # 1. 混合偵測：全幀每幀 + tiled 每 N 幀
-        #    全幀偵測速度快、上下文完整（但機器人僅 ~25px）
-        #    Tiled 偵測解析度高（~75px）但缺乏上下文
+        # 全幀偵測（每幀）
         raw_dets = list(self._detector.detect(frame))
 
+        # 消費上一幀提交的 tiled 偵測結果（非阻塞）
+        if self._pending_tiled_future is not None:
+            if self._pending_tiled_future.done():
+                try:
+                    tiled_dets = self._pending_tiled_future.result()
+                    raw_dets.extend(tiled_dets)
+                except Exception:
+                    pass
+                self._pending_tiled_future = None
+
+        # 提交本幀的 tiled 偵測到背景線程（不複製 frame，detect_tiled 只讀不改）
         if frame_idx % self._detect_interval == 0:
-            tiled_dets = self._detector.detect_tiled(frame)
-            raw_dets.extend(tiled_dets)
+            self._pending_tiled_future = self._tiled_executor.submit(
+                self._detector.detect_tiled, frame)
 
         # 去重：全幀和 tiled 可能偵測到同一機器人
         if len(raw_dets) > 1:
@@ -154,15 +195,24 @@ class _MOTTracker:
             print(f"[DIAG] MOT f{frame_idx}: "
                   f"{len(raw_dets)} dets{src} [{', '.join(det_summary)}]")
 
-        # 2. 追蹤匹配
+        return raw_dets
+
+    def track_update(self, raw_dets: list, frame_idx: int,
+                     frame: np.ndarray | None = None) -> dict:
+        """Phase 2: 匹配追蹤（有狀態，必須依序執行）。
+
+        Args:
+            raw_dets: detect_raw() 的回傳值
+            frame_idx: 幀索引
+            frame: 原始影像（直方圖 Re-ID 用，可為 None）
+
+        Returns:
+            {label: (x, y, w, h) or None}
+        """
         if self._auto_mode:
-            # ── 距離式直接匹配（繞過 ByteTrack）──
-            # ByteTrack 的 IoU 匹配在 4K@60fps 完全失效
-            # （偵測框 ~25px，每幀移動 30-50px → IoU=0）
             results, frame_pos, frame_bbox = \
                 self._match_direct(raw_dets, frame_idx, frame)
         else:
-            # ── ByteTrack 手動標記模式 ──
             results, frame_pos, frame_bbox = \
                 self._match_bytetrack(raw_dets, frame_idx)
 
@@ -175,25 +225,27 @@ class _MOTTracker:
 
         return results
 
+    def update_all(self, frame: np.ndarray, frame_idx: int) -> dict:
+        """偵測 + 追蹤（相容舊 API，內部呼叫 detect_raw + track_update）。"""
+        raw_dets = self.detect_raw(frame, frame_idx)
+        return self.track_update(raw_dets, frame_idx, frame)
+
     def _match_direct(self, raw_dets, frame_idx,
                        frame: np.ndarray | None = None):
-        """全域最短距離匹配（auto_mode 用，不使用 ByteTrack）。
+        """全域最短距離匹配 + Track State Machine。
 
-        使用距離矩陣 + 貪心最短優先匹配，避免順序依賴性。
-        距離閾值依幀間隔動態縮放（近幀嚴格、遠幀寬鬆）。
-        當 frame 不為 None 且 hist_weight > 0 時，加入顏色直方圖加權。
+        Round 1: ACTIVE 軌跡正常貪心匹配
+        Round 2: 剩餘偵測嘗試復活 LOST 軌跡（凍結位置 + 嚴格門檻）
         """
         results = {}
         frame_pos = {}
         frame_bbox = {}
 
-        if not raw_dets:
-            return results, frame_pos, frame_bbox
-
         use_hist = (frame is not None and self._hist_weight > 0
                     and len(self._histograms) > 0)
+        hist_frame = (frame_idx % self._hist_update_interval == 0)
 
-        # 解析所有偵測 + 提取直方圖
+        # 解析所有偵測 + 條件提取直方圖
         det_info = []
         det_hists = []
         for d in raw_dets:
@@ -202,59 +254,50 @@ class _MOTTracker:
             cx = (x1 + x2) / 2
             cy = (y1 + y2) / 2
             det_info.append((cx, cy, x1, y1, x2, y2, conf, int(cls_id)))
-            if use_hist:
+            if use_hist and hist_frame:
                 det_hists.append(
                     self._extract_histogram(frame, x1, y1, x2, y2))
             else:
                 det_hists.append(None)
 
-        # 建構距離矩陣：(有效距離, det_idx, label)
-        candidates = list(self._last_known.keys())
+        # ═══ Round 1: ACTIVE 軌跡匹配 ═══
+        active_labels = [
+            label for label in self._last_known
+            if self._track_state.get(label) != "lost"
+        ]
         pairs = []
         for di, (cx, cy, *_, cls_id) in enumerate(det_info):
-            for label in candidates:
+            for label in active_labels:
                 lk = self._last_known[label]
                 last_f, last_cx, last_cy, last_cls = lk[0], lk[1], lk[2], lk[3]
                 last_vx = lk[4] if len(lk) > 4 else 0.0
                 last_vy = lk[5] if len(lk) > 5 else 0.0
-                # 類別不相容（紅不配藍）
                 if (last_cls >= 0 and cls_id >= 0
                         and last_cls != cls_id):
                     continue
-                # 超過時間限制
                 frame_gap = frame_idx - last_f
-                if frame_gap > self._reid_max_frames:
-                    continue
-                # 速度預測：用歷史速度外推到當前幀的預測位置
+                # 速度預測
                 pred_cx = last_cx + last_vx * frame_gap
                 pred_cy = last_cy + last_vy * frame_gap
                 spatial_dist = math.hypot(cx - pred_cx, cy - pred_cy)
-                # 動態距離閾值：基準 × (1 + sqrt(幀間隔/fps))
-                # 連續幀 → 1.13x；10幀 → 1.41x；60幀 → 2x；180幀 → 2.73x
                 max_dist = self._reid_max_dist * (
                     1 + math.sqrt(frame_gap / self._fps))
                 if spatial_dist >= max_dist:
                     continue
-
-                # 顏色直方圖加權：距離 × (1 + w * (1 - similarity))
-                # 外觀相似 → factor ≈ 1（不影響）
-                # 外觀不同 → factor 最大 1 + w（距離放大 40%）
                 effective_dist = spatial_dist
                 if (use_hist and det_hists[di] is not None
                         and label in self._histograms):
                     sim = self._compare_histograms(
                         det_hists[di], self._histograms[label])
-                    sim = max(0.0, sim)  # CORREL 可能為負
+                    sim = max(0.0, sim)
                     effective_dist = spatial_dist * (
                         1 + self._hist_weight * (1 - sim))
-
                 pairs.append((effective_dist, di, label))
 
-        # 按有效距離排序，貪心匹配（最短距離優先）
         pairs.sort(key=lambda p: p[0])
         used_dets = set()
         used_labels = set()
-        det_label_map = {}  # det_idx → label
+        det_label_map = {}
 
         for dist, di, label in pairs:
             if di in used_dets or label in used_labels:
@@ -263,12 +306,63 @@ class _MOTTracker:
             used_dets.add(di)
             used_labels.add(label)
 
-        # 處理所有偵測（匹配的 + 新建的）
+        # ═══ Round 2: LOST 軌跡復活 ═══
+        lost_labels = [
+            label for label in self._last_known
+            if self._track_state.get(label) == "lost"
+        ]
+        if lost_labels:
+            lost_max_dist = self._reid_max_dist * MOT_LOST_REID_DIST_SCALE
+            lost_pairs = []
+            for di in range(len(det_info)):
+                if di in used_dets:
+                    continue
+                cx, cy, *_, cls_id = det_info[di]
+                for label in lost_labels:
+                    lk = self._last_known[label]
+                    last_f, last_cx, last_cy, last_cls = (
+                        lk[0], lk[1], lk[2], lk[3])
+                    if (last_cls >= 0 and cls_id >= 0
+                            and last_cls != cls_id):
+                        continue
+                    # LOST: 用凍結位置（不外推速度）
+                    spatial_dist = math.hypot(cx - last_cx, cy - last_cy)
+                    if spatial_dist >= lost_max_dist:
+                        continue
+                    # 直方圖門檻
+                    if label in self._histograms:
+                        det_hist = (det_hists[di] if det_hists[di] is not None
+                                    else self._extract_histogram(
+                                        frame, det_info[di][2], det_info[di][3],
+                                        det_info[di][4], det_info[di][5])
+                                    if frame is not None else None)
+                        if det_hist is not None:
+                            sim = self._compare_histograms(
+                                det_hist, self._histograms[label])
+                            sim = max(0.0, sim)
+                            if sim < MOT_LOST_MIN_HIST_SIM:
+                                continue
+                            spatial_dist = spatial_dist * (
+                                1 + self._hist_weight * (1 - sim))
+                    lost_pairs.append((spatial_dist, di, label))
+
+            lost_pairs.sort(key=lambda p: p[0])
+            for dist, di, label in lost_pairs:
+                if di in used_dets or label in used_labels:
+                    continue
+                det_label_map[di] = label
+                used_dets.add(di)
+                used_labels.add(label)
+                # 復活: LOST → ACTIVE
+                self._track_state[label] = "active"
+                self._lost_since.pop(label, None)
+                self._missed_frames[label] = 0
+
+        # ═══ 處理所有偵測（匹配的 + 新建的）═══
         for di, (cx, cy, x1, y1, x2, y2, conf, cls_id) in enumerate(det_info):
             if di in det_label_map:
                 label = det_label_map[di]
             else:
-                # 全新機器人 — 先嘗試匹配用戶標記
                 label = self._consume_pending_marker(
                     cx, cy, cls_id, frame_idx)
                 if not label:
@@ -278,17 +372,15 @@ class _MOTTracker:
                 if frame_idx < 5 or frame_idx % 100 == 0:
                     print(f"[INFO] MOT new: {label} (f{frame_idx})")
 
-            # 記錄位置
             w, h = x2 - x1, y2 - y1
-            self._positions[label].append((frame_idx, cx, cy))
-            self._bboxes[label].append(
+            self._positions.setdefault(label, []).append((frame_idx, cx, cy))
+            self._bboxes.setdefault(label, []).append(
                 (frame_idx, float(x1), float(y1), float(x2), float(y2)))
             self._detected_frames.setdefault(label, set()).add(frame_idx)
             frame_pos[label] = (cx, cy)
             frame_bbox[label] = (float(x1), float(y1),
                                  float(x2), float(y2))
             results[label] = (int(x1), int(y1), int(w), int(h))
-            # 計算速度（像素/幀）
             vx, vy = 0.0, 0.0
             if label in self._last_known:
                 prev = self._last_known[label]
@@ -298,24 +390,70 @@ class _MOTTracker:
                     vy = (cy - prev[2]) / dt
             self._last_known[label] = (frame_idx, cx, cy, cls_id, vx, vy)
 
-            # 更新顏色直方圖（EMA 平滑）
-            if frame is not None:
+            # 狀態：確認 ACTIVE + 重置 missed
+            self._track_state[label] = "active"
+            self._missed_frames[label] = 0
+
+            is_new_label = label not in self._histograms
+            if frame is not None and (is_new_label or hist_frame):
                 new_hist = (det_hists[di] if det_hists[di] is not None
                             else self._extract_histogram(
                                 frame, x1, y1, x2, y2))
                 if new_hist is not None:
-                    if label in self._histograms:
-                        # EMA: 70% 舊 + 30% 新（漸進更新，抗瞬時遮擋）
+                    if not is_new_label:
                         self._histograms[label] = (
                             0.7 * self._histograms[label] + 0.3 * new_hist)
                     else:
                         self._histograms[label] = new_hist
 
+        # ═══ 更新未匹配 ACTIVE 軌跡的狀態 ═══
+        for label in active_labels:
+            if label in used_labels:
+                continue
+            # 遞增 missed 計數
+            missed = self._missed_frames.get(label, 0) + 1
+            self._missed_frames[label] = missed
+            if missed >= MOT_LOST_GRACE_FRAMES:
+                # Grace period 結束 → 轉為 LOST
+                self._track_state[label] = "lost"
+                if label not in self._lost_since:
+                    self._lost_since[label] = frame_idx
+
+        # ═══ 清除超時 LOST 軌跡 (REMOVED) ═══
+        for label in list(self._lost_since.keys()):
+            if self._track_state.get(label) != "lost":
+                continue
+            lost_duration = frame_idx - self._lost_since[label]
+            # 判斷是否在遮擋區域
+            lk = self._last_known.get(label)
+            if lk and self._occlusion_zones:
+                last_cx, last_cy = lk[1], lk[2]
+                in_occlusion = any(
+                    point_in_polygon(last_cx, last_cy, z.polygon)
+                    or min_distance_to_polygon_edge(
+                        last_cx, last_cy, z.polygon) < MOT_OCCLUSION_MARGIN
+                    for z in self._occlusion_zones
+                )
+                patience = (MOT_OCCLUSION_PATIENCE if in_occlusion
+                            else MOT_MAX_LOST_FRAMES)
+            else:
+                patience = MOT_MAX_LOST_FRAMES
+            if lost_duration > patience:
+                # REMOVED: 從 runtime dicts 移除，保留歷史資料
+                self._last_known.pop(label, None)
+                self._track_state.pop(label, None)
+                self._lost_since.pop(label, None)
+                self._missed_frames.pop(label, None)
+                # 不刪 _positions, _bboxes, _detected_frames（後處理需要）
+
         # 診斷
         if frame_idx < 5:
             labels = list(results.keys())
+            lost_count = sum(
+                1 for s in self._track_state.values() if s == "lost")
             print(f"[DIAG] MOT f{frame_idx}: "
-                  f"matched {len(results)} robots {labels}")
+                  f"matched {len(results)} robots {labels}, "
+                  f"lost={lost_count}")
 
         return results, frame_pos, frame_bbox
 
@@ -413,47 +551,6 @@ class _MOTTracker:
                   f"(幀 {frame_idx})")
             return label
         return None
-
-    def _try_reid(self, cx: float, cy: float, class_id: int,
-                  frame_idx: int, lost_labels: set) -> str | None:
-        """嘗試將新偵測與丟失的機器人匹配（距離式重新辨識）。
-
-        注意：此方法已不被 _match_direct 使用（改用全域距離矩陣）。
-        保留供 _match_bytetrack 手動模式使用。
-
-        Returns:
-            匹配的 label 或 None
-        """
-        best_label = None
-        best_dist = float('inf')
-
-        for label in lost_labels:
-            if label not in self._last_known:
-                continue
-
-            lk = self._last_known[label]
-            last_f, last_cx, last_cy, last_cls = lk[0], lk[1], lk[2], lk[3]
-
-            # 超過時間限制不重新辨識
-            frame_gap = frame_idx - last_f
-            if frame_gap > self._reid_max_frames:
-                continue
-
-            # 類別不相容（紅不配藍）
-            if (last_cls >= 0 and class_id >= 0
-                    and last_cls != class_id):
-                continue
-
-            # 動態距離閾值
-            max_dist = self._reid_max_dist * (
-                1 + math.sqrt(frame_gap / self._fps))
-
-            d = math.hypot(cx - last_cx, cy - last_cy)
-            if d < max_dist and d < best_dist:
-                best_dist = d
-                best_label = label
-
-        return best_label
 
     def _match_pending_markers(self, tracked, frame_idx: int):
         """將用戶標記的機器人 bbox 與 ByteTrack 追蹤 ID 匹配。"""
@@ -733,6 +830,17 @@ class _MOTTracker:
             if short_label in self._last_known:
                 self._last_known.pop(short_label)
 
+            # 更新 state machine
+            self._track_state.pop(short_label, None)
+            self._lost_since.pop(short_label, None)
+            self._missed_frames.pop(short_label, None)
+            self._static_labels.discard(short_label)
+            # 合併 detected_frames
+            if short_label in self._detected_frames:
+                self._detected_frames.setdefault(
+                    long_label, set()).update(
+                    self._detected_frames.pop(short_label))
+
     def interpolate_positions(self):
         """對所有機器人的丟失幀做線性位置插值。"""
         for label in list(self._positions.keys()):
@@ -819,6 +927,12 @@ class _MOTTracker:
             self._bboxes.pop(label, None)
             self._robot_info.pop(label, None)
             self._last_known.pop(label, None)
+            self._track_state.pop(label, None)
+            self._lost_since.pop(label, None)
+            self._missed_frames.pop(label, None)
+            self._detected_frames.pop(label, None)
+            self._histograms.pop(label, None)
+            self._static_labels.discard(label)
             for f in list(self._frame_positions.keys()):
                 self._frame_positions[f].pop(label, None)
             for f in list(self._frame_bboxes.keys()):
@@ -835,39 +949,29 @@ class _MOTTracker:
     def filter_static_labels(self,
                              max_variance: float = MOT_STATIC_MAX_VARIANCE,
                              min_frames: int = MOT_STATIC_MIN_FRAMES):
-        """移除位置幾乎不動的 label（場地元素如 trench/hub 過濾）。
+        """標記位置幾乎不動的 label（不再刪除，改為標記）。
 
         靜止判定：追蹤幀數 >= min_frames 且位置變異數 < max_variance。
+        標記結果存入 self._static_labels，不影響追蹤資料。
         """
-        to_remove = []
+        self._static_labels.clear()
+        marked = []
         for label, pos_list in self._positions.items():
             if len(pos_list) < min_frames:
-                continue  # 太短的軌跡由 filter_short_labels 處理
-            xs = [p[1] for p in pos_list]  # (frame, cx, cy)
+                continue
+            xs = [p[1] for p in pos_list]
             ys = [p[2] for p in pos_list]
             var_x = np.var(xs)
             var_y = np.var(ys)
             total_var = var_x + var_y
             if total_var < max_variance:
-                to_remove.append((label, len(pos_list), total_var))
+                self._static_labels.add(label)
+                marked.append((label, len(pos_list), total_var))
 
-        for label, count, var in to_remove:
-            self._positions.pop(label, None)
-            self._bboxes.pop(label, None)
-            self._robot_info.pop(label, None)
-            self._last_known.pop(label, None)
-            for f in list(self._frame_positions.keys()):
-                self._frame_positions[f].pop(label, None)
-            for f in list(self._frame_bboxes.keys()):
-                self._frame_bboxes[f].pop(label, None)
-
-        if to_remove:
-            removed_names = [f"{l}({c}f, var={v:.1f})" for l, c, v in to_remove]
-            print(f"[INFO] MOT static filter: 移除 {len(to_remove)} 個靜止 label "
-                  f"(var < {max_variance}): {', '.join(removed_names)}")
-            remaining = list(self._robot_info.keys())
-            print(f"[INFO] MOT static filter: 保留 {len(remaining)} 個 label: "
-                  f"{', '.join(remaining)}")
+        if marked:
+            marked_names = [f"{l}({c}f, var={v:.1f})" for l, c, v in marked]
+            print(f"[INFO] MOT static filter: 標記 {len(marked)} 個靜止 label "
+                  f"(var < {max_variance}): {', '.join(marked_names)}")
 
     def clear(self):
         self._label_map.clear()
@@ -880,6 +984,11 @@ class _MOTTracker:
         self._last_known.clear()
         self._histograms.clear()
         self._detected_frames.clear()
+        self._track_state.clear()
+        self._lost_since.clear()
+        self._missed_frames.clear()
+        self._static_labels.clear()
+        self._occlusion_zones.clear()
         self._next_red_id = 1
         self._next_blue_id = 1
         self._next_robot_id = 1
@@ -1186,12 +1295,32 @@ class RobotTrackerManager:
         if self._use_mot:
             self._impl.enable_auto_mode()
 
+    def set_occlusion_zones(self, zones):
+        """設定遮擋區域列表。"""
+        if hasattr(self._impl, 'set_occlusion_zones'):
+            self._impl.set_occlusion_zones(zones)
+
     @property
     def robot_info(self) -> dict:
         """取得所有機器人的資訊 {label: {"alliance": str, ...}}。"""
         if hasattr(self._impl, '_robot_info'):
             return dict(self._impl._robot_info)
         return {}
+
+    def detect_raw(self, frame: np.ndarray, frame_idx: int) -> list:
+        """Phase 1: 偵測（可在 producer 線程提前執行）。"""
+        if self._use_mot:
+            return self._impl.detect_raw(frame, frame_idx)
+        # SOT: 偵測與追蹤耦合，producer 無法提前偵測
+        return None
+
+    def track_update(self, raw_dets, frame_idx: int,
+                     frame: np.ndarray | None = None) -> dict:
+        """Phase 2: 追蹤匹配（必須依序執行）。"""
+        if self._use_mot:
+            return self._impl.track_update(raw_dets, frame_idx, frame)
+        # SOT: 執行完整 update_all
+        return self._impl.update_all(frame, frame_idx)
 
     def update_all(self, frame: np.ndarray, frame_idx: int) -> dict:
         return self._impl.update_all(frame, frame_idx)
