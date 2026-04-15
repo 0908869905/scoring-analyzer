@@ -107,4 +107,58 @@ Windows 的 multiprocessing 使用 spawn 模式（不是 fork），子程序會�
 - 測試環境與部署環境 OS 相同時才能安心使用 `workers>0`
 
 ---
+
+## 2026-03-14: Blue-N 標籤顯示紅色追蹤框
+
+### 症狀
+分析完成後，某些 Blue-N 標籤的機器人追蹤框顯示為紅色而非藍色，顏色與聯盟不一致。
+
+### 原因
+雙重根因：
+1. **`robot_positions_cache` 殘留**: 後處理（merge + filter + interpolate）後重建快取時沒先 `clear()`，已被移除的 label 仍殘留在快取中，渲染時讀到過時的聯盟資訊
+2. **`auto_robots` 收集邏輯缺陷**: `auto_robots` 只在 `_robot_markers` 為空時才收集自動偵測的 label，手動標記任一機器人後，其他自動偵測到的 label 就不會被加入，導致它們沒有正確的顏色映射
+
+### 解決
+1. `robot_positions_cache` 重建前先 `clear()` 確保乾淨狀態
+2. `auto_robots` 改為**總是補充**未被手動標記的 label，不再受 `_robot_markers` 是否為空的限制
+
+### 預防
+- 快取重建時**必須先清空**，不可增量更新（容易殘留過時資料）
+- 自動/手動 label 收集邏輯應獨立運作，手動標記不應阻擋自動收集
+
+---
+
+## 2026-03-14: HP 歸因漏判 — 球軌跡起點已飛過 HP 線段
+
+### 症狀
+藍方 HP 進球數顯示 0，明明有 HP 送球進球。同時部分非 HP 的球被錯誤歸因為 HP。
+
+### 原因
+球在 HP 手中/剛拋出時未被偵測（被身體遮擋或運動模糊），軌跡起點已在 HP 線段另一側。原 `_check_hp_attribution()` 只檢查線段交叉，軌跡不穿過線段就漏判。`SCORE_HP_PROXIMITY=50` 過嚴加劇漏判。
+
+### 解決
+`_check_hp_attribution()` 重構為三層判定：交叉 > 距離容忍 (150px) > 起源判定 (400px)。`SCORE_HP_PROXIMITY` 50→150。
+
+### 預防
+- HP 歸因不能只依賴單一幾何判定，需要多層 fallback 覆蓋偵測盲區
+- 加入診斷日誌，每次 HP 歸因記錄通過的 layer，方便 debug
+
+---
+
+## 2026-03-15: scoring.py UnboundLocalError — sorted_events 未定義
+
+### 症狀
+`reattribute_shooters()` 執行時在第 1538 行拋出 `UnboundLocalError: name 'sorted_events' is not defined`。
+
+### 原因
+`sorted_events` 變數在使用之前從未被定義。程式碼直接引用 `sorted_events` 進行排序迭代，但該變數不存在。
+
+### 解決
+在使用前加上 `sorted_events` 的定義（對 `goal_events` 按幀號排序）。
+
+### 預防
+- 新增變數引用時確認在所有執行路徑上都有定義
+- Python 的 `UnboundLocalError` 通常表示變數名拼寫錯誤或條件分支中遺漏了初始化
+
+---
 *Created: 2026-02-14*

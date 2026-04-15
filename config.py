@@ -122,10 +122,19 @@ MOT_LOST_GRACE_FRAMES = 3          # 連續未偵測幀數閾值，超過後 ACT
 MOT_LOST_REID_DIST_SCALE = 0.5     # LOST 復活距離閾值倍率（更嚴格）
 MOT_LOST_MIN_HIST_SIM = 0.3        # LOST 復活最低直方圖相似度
 MOT_OCCLUSION_MARGIN = 50          # 遮擋區域邊緣緩衝（像素）
+MOT_DEDUP_IOU = 0.5                # 重複追蹤清除：同幀兩軌跡 bbox IoU 超過此值視為重複
+MOT_ACTIVE_MAX_DIST = 200          # ACTIVE 匹配最大距離（像素，防止遠距離搶 ID）
 
 # ── 進球判定參數 ──────────────────────────────────────
-SCORE_PROXIMITY_FRAMES = 15  # 回溯射手歸因的幀數
+SCORE_PROXIMITY_FRAMES = 80  # 回溯射手歸因的幀數（80幀 ≈ 2.7秒 @30fps）
 SCORE_MAX_SHOOTER_DIST = 500 # 射手歸因最大距離（像素，4K 下需 500+）
+SCORE_HP_PROXIMITY = 150     # HP 歸因距離容忍（像素，球軌跡任一點距 HP 線段的最大距離）
+SCORE_HP_ORIGIN_DIST = 400   # HP 歸因起源距離（像素，球軌跡最早點距 HP 線段的最大距離，更寬鬆）
+SCORE_EXTRAPOLATE_FRAMES = 20 # 軌跡外推幀數（球首次偵測已在飛行時，用初始速度外推估計發射位置）
+SCORE_DIRECTION_WEIGHT = 0.3  # 方向對齊權重（0~1，球飛離射手方向的距離加權修正）
+SCORE_MIN_VELOCITY_FOR_DIR = 5 # 方向評分最低球速（像素/幀，低速球方向不穩不計算方向修正）
+SCORE_ALLIANCE_BIAS = 0.85    # 聯盟一致性偏好（0~1，同聯盟射手分數乘此值，越低偏好越強）
+SCORE_TRACE_MAX_DT = 3        # 軌跡追溯最大可信幀間隔（超過此值的速度估算不可靠，可能是球被遮擋）
 SCORE_ZONE_DWELL_FRAMES = 1  # 球進入區域即算進球
 SCORE_COOLDOWN_FRAMES = 10   # 同一球連續進球冷卻幀數
 BALL_OWNERSHIP_DIST = 200    # 球所有權：球距機器人多近才算「持有」（像素，4K 下約機器人 2-3 倍半徑）

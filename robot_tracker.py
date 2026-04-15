@@ -10,6 +10,7 @@ import os
 
 import cv2
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -26,6 +27,8 @@ from config import (
     MOT_LOST_MIN_HIST_SIM, MOT_OCCLUSION_MARGIN,
     MOT_MERGE_MAX_OVERLAP, MOT_MERGE_BOUNDARY_DIST, MOT_MERGE_SEARCH_WINDOW,
     MOT_STATIC_MAX_VARIANCE, MOT_STATIC_MIN_FRAMES,
+    MOT_DEDUP_IOU,
+    MOT_ACTIVE_MAX_DIST,
 )
 from geometry import rect_center, point_in_polygon, min_distance_to_polygon_edge
 
@@ -95,6 +98,8 @@ class _MOTTracker:
         self._next_robot_id = 1
         self._last_known: dict[str, tuple] = {}
         # {label: (frame_idx, cx, cy, class_id, vx, vy)}
+        self._last_bbox: dict[str, tuple] = {}
+        # {label: (x1, y1, x2, y2) of last matched detection}
         self._reid_max_dist = MOT_REID_MAX_DIST
 
         # ── 顏色直方圖 Re-ID ──
@@ -185,6 +190,25 @@ class _MOTTracker:
             else:
                 raw_dets = []
 
+        # 中心距離去重：全幀和 tiled 的 bbox 尺寸差異大時 IoU 低，NMS 無法合併
+        # 用中心距離 100px 門檻補充去重，保留信心最高的
+        if len(raw_dets) > 1:
+            raw_dets_sorted = sorted(raw_dets, key=lambda d: d[4], reverse=True)
+            kept = []
+            for det in raw_dets_sorted:
+                cx = (det[0] + det[2]) / 2
+                cy = (det[1] + det[3]) / 2
+                too_close = False
+                for k in kept:
+                    kcx = (k[0] + k[2]) / 2
+                    kcy = (k[1] + k[3]) / 2
+                    if math.hypot(cx - kcx, cy - kcy) < 100:
+                        too_close = True
+                        break
+                if not too_close:
+                    kept.append(det)
+            raw_dets = kept
+
         # 診斷：前幾幀印出偵測詳情
         if frame_idx < 5:
             det_summary = []
@@ -266,45 +290,69 @@ class _MOTTracker:
             if self._track_state.get(label) != "lost"
         ]
         pairs = []
-        for di, (cx, cy, *_, cls_id) in enumerate(det_info):
+        for di, (cx, cy, x1, y1, x2, y2, conf, cls_id) in enumerate(det_info):
             for label in active_labels:
                 lk = self._last_known[label]
                 last_f, last_cx, last_cy, last_cls = lk[0], lk[1], lk[2], lk[3]
-                last_vx = lk[4] if len(lk) > 4 else 0.0
-                last_vy = lk[5] if len(lk) > 5 else 0.0
                 if (last_cls >= 0 and cls_id >= 0
                         and last_cls != cls_id):
                     continue
                 frame_gap = frame_idx - last_f
-                # 速度預測
-                pred_cx = last_cx + last_vx * frame_gap
-                pred_cy = last_cy + last_vy * frame_gap
-                spatial_dist = math.hypot(cx - pred_cx, cy - pred_cy)
-                max_dist = self._reid_max_dist * (
-                    1 + math.sqrt(frame_gap / self._fps))
+                # 凍結位置：不使用速度外推，避免飄移搶別人偵測
+                spatial_dist = math.hypot(cx - last_cx, cy - last_cy)
+                # ACTIVE 匹配收緊：限制最大距離防止遠距離搶 ID
+                max_dist = min(
+                    MOT_ACTIVE_MAX_DIST,
+                    self._reid_max_dist * (
+                        1 + math.sqrt(frame_gap / self._fps)))
                 if spatial_dist >= max_dist:
                     continue
                 effective_dist = spatial_dist
+                # IoU bbox 加權：bbox 重疊度高的匹配更可靠
+                lb = self._last_bbox.get(label)
+                if lb is not None:
+                    ix1 = max(x1, lb[0])
+                    iy1 = max(y1, lb[1])
+                    ix2 = min(x2, lb[2])
+                    iy2 = min(y2, lb[3])
+                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    area_det = (x2 - x1) * (y2 - y1)
+                    area_lb = (lb[2] - lb[0]) * (lb[3] - lb[1])
+                    union = area_det + area_lb - inter
+                    iou = inter / union if union > 0 else 0
+                    # 高 IoU → 低 cost，低 IoU → 高 cost
+                    effective_dist *= (2.0 - iou)
                 if (use_hist and det_hists[di] is not None
                         and label in self._histograms):
                     sim = self._compare_histograms(
                         det_hists[di], self._histograms[label])
                     sim = max(0.0, sim)
-                    effective_dist = spatial_dist * (
-                        1 + self._hist_weight * (1 - sim))
+                    effective_dist *= (1 + self._hist_weight * (1 - sim))
                 pairs.append((effective_dist, di, label))
 
-        pairs.sort(key=lambda p: p[0])
+        # ── Hungarian 最優匹配（取代 greedy） ──
         used_dets = set()
         used_labels = set()
         det_label_map = {}
 
-        for dist, di, label in pairs:
-            if di in used_dets or label in used_labels:
-                continue
-            det_label_map[di] = label
-            used_dets.add(di)
-            used_labels.add(label)
+        if pairs and active_labels and det_info:
+            # 建立 cost matrix: rows=detections, cols=active_labels
+            label_idx_map = {lbl: i for i, lbl in enumerate(active_labels)}
+            n_det = len(det_info)
+            n_lbl = len(active_labels)
+            BIG = 1e6  # 不可匹配的大 cost
+            cost_matrix = np.full((n_det, n_lbl), BIG, dtype=np.float64)
+            for eff_dist, di, label in pairs:
+                li = label_idx_map[label]
+                # 取最小 cost（同一 det-label 可能有多個 pair）
+                if eff_dist < cost_matrix[di, li]:
+                    cost_matrix[di, li] = eff_dist
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            for r, c in zip(row_ind, col_ind):
+                if cost_matrix[r, c] < BIG:
+                    det_label_map[r] = active_labels[c]
+                    used_dets.add(r)
+                    used_labels.add(active_labels[c])
 
         # ═══ Round 2: LOST 軌跡復活 ═══
         lost_labels = [
@@ -350,6 +398,18 @@ class _MOTTracker:
             for dist, di, label in lost_pairs:
                 if di in used_dets or label in used_labels:
                     continue
+                # 鄰近守衛：如果這個偵測太靠近已匹配的偵測，跳過
+                # （避免 LOST 復活在重複偵測上，造成兩框追同一台）
+                det_cx, det_cy = det_info[di][0], det_info[di][1]
+                too_close = False
+                for matched_di in used_dets:
+                    mcx, mcy = (det_info[matched_di][0],
+                                det_info[matched_di][1])
+                    if math.hypot(det_cx - mcx, det_cy - mcy) < 80:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
                 det_label_map[di] = label
                 used_dets.add(di)
                 used_labels.add(label)
@@ -363,6 +423,17 @@ class _MOTTracker:
             if di in det_label_map:
                 label = det_label_map[di]
             else:
+                # 幽靈偵測守衛：如果這個偵測靠近已匹配的偵測，
+                # 它很可能是同一機器人的重複偵測（全幀+tiled 尺寸差異），跳過
+                is_ghost = False
+                for matched_di in det_label_map:
+                    mcx, mcy = det_info[matched_di][0], det_info[matched_di][1]
+                    if math.hypot(cx - mcx, cy - mcy) < 100:
+                        is_ghost = True
+                        break
+                if is_ghost:
+                    continue
+
                 label = self._consume_pending_marker(
                     cx, cy, cls_id, frame_idx)
                 if not label:
@@ -389,6 +460,8 @@ class _MOTTracker:
                     vx = (cx - prev[1]) / dt
                     vy = (cy - prev[2]) / dt
             self._last_known[label] = (frame_idx, cx, cy, cls_id, vx, vy)
+            self._last_bbox[label] = (float(x1), float(y1),
+                                      float(x2), float(y2))
 
             # 狀態：確認 ACTIVE + 重置 missed
             self._track_state[label] = "active"
@@ -406,6 +479,47 @@ class _MOTTracker:
                     else:
                         self._histograms[label] = new_hist
 
+        # ═══ 重複追蹤清除 ═══
+        # 如果兩個軌跡的 bbox 高度重疊（IoU > 閾值），移除偵測幀較少的
+        if len(frame_bbox) > 1:
+            labels_in_frame = list(frame_bbox.keys())
+            to_remove = set()
+            for i in range(len(labels_in_frame)):
+                la = labels_in_frame[i]
+                if la in to_remove:
+                    continue
+                ba = frame_bbox[la]  # (x1, y1, x2, y2)
+                for j in range(i + 1, len(labels_in_frame)):
+                    lb = labels_in_frame[j]
+                    if lb in to_remove:
+                        continue
+                    bb = frame_bbox[lb]
+                    # 計算 IoU
+                    ix1 = max(ba[0], bb[0])
+                    iy1 = max(ba[1], bb[1])
+                    ix2 = min(ba[2], bb[2])
+                    iy2 = min(ba[3], bb[3])
+                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    area_a = (ba[2] - ba[0]) * (ba[3] - ba[1])
+                    area_b = (bb[2] - bb[0]) * (bb[3] - bb[1])
+                    union = area_a + area_b - inter
+                    iou = inter / union if union > 0 else 0
+                    if iou > MOT_DEDUP_IOU:
+                        # 保留偵測幀多的，移除少的
+                        fa = len(self._detected_frames.get(la, set()))
+                        fb = len(self._detected_frames.get(lb, set()))
+                        victim = lb if fa >= fb else la
+                        to_remove.add(victim)
+            for victim in to_remove:
+                frame_pos.pop(victim, None)
+                frame_bbox.pop(victim, None)
+                results.pop(victim, None)
+                # 標記為 LOST（讓它自然超時被清除）
+                self._track_state[victim] = "lost"
+                if victim not in self._lost_since:
+                    self._lost_since[victim] = frame_idx
+                self._missed_frames[victim] = 0
+
         # ═══ 更新未匹配 ACTIVE 軌跡的狀態 ═══
         for label in active_labels:
             if label in used_labels:
@@ -413,7 +527,21 @@ class _MOTTracker:
             # 遞增 missed 計數
             missed = self._missed_frames.get(label, 0) + 1
             self._missed_frames[label] = missed
-            if missed >= MOT_LOST_GRACE_FRAMES:
+            # 遮擋區域附近的機器人更快轉為 LOST（grace=1 vs 預設 3）
+            # 防止遮擋中的機器人搶走其他機器人的偵測
+            grace = MOT_LOST_GRACE_FRAMES
+            lk = self._last_known.get(label)
+            if lk and self._occlusion_zones:
+                last_cx, last_cy = lk[1], lk[2]
+                near_occlusion = any(
+                    point_in_polygon(last_cx, last_cy, z.polygon)
+                    or min_distance_to_polygon_edge(
+                        last_cx, last_cy, z.polygon) < MOT_OCCLUSION_MARGIN
+                    for z in self._occlusion_zones
+                )
+                if near_occlusion:
+                    grace = 1  # 遮擋區域：1 幀未偵測即 LOST
+            if missed >= grace:
                 # Grace period 結束 → 轉為 LOST
                 self._track_state[label] = "lost"
                 if label not in self._lost_since:
@@ -441,6 +569,7 @@ class _MOTTracker:
             if lost_duration > patience:
                 # REMOVED: 從 runtime dicts 移除，保留歷史資料
                 self._last_known.pop(label, None)
+                self._last_bbox.pop(label, None)
                 self._track_state.pop(label, None)
                 self._lost_since.pop(label, None)
                 self._missed_frames.pop(label, None)
@@ -826,9 +955,9 @@ class _MOTTracker:
             # 移除 robot_info
             self._robot_info.pop(short_label, None)
 
-            # 更新 last_known
-            if short_label in self._last_known:
-                self._last_known.pop(short_label)
+            # 更新 last_known / last_bbox
+            self._last_known.pop(short_label, None)
+            self._last_bbox.pop(short_label, None)
 
             # 更新 state machine
             self._track_state.pop(short_label, None)
@@ -982,6 +1111,7 @@ class _MOTTracker:
         self._frame_positions.clear()
         self._frame_bboxes.clear()
         self._last_known.clear()
+        self._last_bbox.clear()
         self._histograms.clear()
         self._detected_frames.clear()
         self._track_state.clear()

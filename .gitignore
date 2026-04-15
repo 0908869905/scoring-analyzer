@@ -40,6 +40,10 @@ train_colab.ipynb
 *.mov
 *.avi
 *.mkv
+videos/
+
+# Scratch (debug images, screenshots, throwaway files)
+scratch/
 
 # Test/debug images
 debug_*.jpg

@@ -149,6 +149,7 @@ class ScoringAnalyzer(ctk.CTk):
         # 分析引擎
         self.scoring_engine = ScoringEngine(fps=self.fps)
         self._analyzing = False
+        self._analysis_cancel = False  # 分析中斷旗標
         self._analysis_done = False
 
         # 分析結果快取
@@ -410,6 +411,15 @@ class ScoringAnalyzer(ctk.CTk):
                               size=13, weight="bold"),
             command=lambda: self._on_analyze(max_seconds=None))
         self.analyze_full_btn.pack(side=tk.LEFT, padx=(2, 4), pady=4)
+
+        self.analyze_cancel_btn = ctk.CTkButton(
+            toolbar_row2, text="⏹ 中斷", height=32, corner_radius=8,
+            fg_color=COLORS["error"], hover_color=COLORS["error_hover"],
+            text_color="white",
+            font=ctk.CTkFont(family="Microsoft JhengHei UI",
+                              size=13, weight="bold"),
+            command=self._cancel_analysis)
+        # 預設隱藏，分析時才顯示
 
         self.crop_btn = ctk.CTkButton(
             toolbar_row2, text="裁切畫面", height=30, corner_radius=8,
@@ -2117,7 +2127,7 @@ class ScoringAnalyzer(ctk.CTk):
             self._set_status("請先標記至少一個得分區域", COLORS["error"])
             return
         if self._analyzing:
-            self._set_status("分析進行中...", COLORS["accent"])
+            self._set_status("分析進行中，請點擊「中斷」按鈕停止", COLORS["accent"])
             return
 
         # 計算最大幀數
@@ -2131,8 +2141,10 @@ class ScoringAnalyzer(ctk.CTk):
 
         self._clear_analysis()
         self._analyzing = True
+        self._analysis_cancel = False
         self.analyze_quick_btn.configure(state="disabled")
         self.analyze_full_btn.configure(state="disabled")
+        self.analyze_cancel_btn.pack(side=tk.LEFT, padx=(2, 4), pady=4)
         self.progress_bar.pack(fill=tk.X, padx=12, pady=(0, 6))
         self.progress_bar.set(0)
         label = f"分析中（前 {max_seconds} 秒）..." if max_seconds else "分析中（完整影片）..."
@@ -2292,6 +2304,8 @@ class ScoringAnalyzer(ctk.CTk):
             """背景線程：讀幀 + 所有偵測，結果排入佇列。"""
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             for fidx in range(total):
+                if self._analysis_cancel:
+                    break
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -2309,6 +2323,8 @@ class ScoringAnalyzer(ctk.CTk):
 
         # Consumer：依序追蹤 + 進球判定
         while True:
+            if self._analysis_cancel:
+                break
             item = det_queue.get()
             if item is None:
                 break
@@ -2355,6 +2371,11 @@ class ScoringAnalyzer(ctk.CTk):
         producer.join()
         cap.release()
 
+        if self._analysis_cancel:
+            self._analysis_cancel = False
+            self.after(0, lambda: self._analysis_cancelled())
+            return
+
         print(f"[INFO] 分析完成: 共 {total} 幀, "
               f"球偵測總計 {total_ball_dets}, "
               f"機器人偵測總計 {total_robot_dets}")
@@ -2369,8 +2390,10 @@ class ScoringAnalyzer(ctk.CTk):
         robot_mgr.filter_short_labels()
         robot_mgr.filter_static_labels()
         robot_mgr.interpolate_positions()
-        # 更新插值後的位置快取
+        # 完整重建快取（清除後處理前的舊資料，避免已移除/合併 label 殘留）
         if robot_mgr.use_mot:
+            robot_positions_cache.clear()
+            robot_bboxes_cache.clear()
             for frame_idx in range(total):
                 pos = robot_mgr.get_all_display_positions(frame_idx)
                 if pos:
@@ -2391,14 +2414,16 @@ class ScoringAnalyzer(ctk.CTk):
         # 射手重新歸因（優先用 ownership，fallback 到距離搜尋）
         engine.reattribute_shooters(all_trajectories, robot_positions_cache)
 
-        # 收集自動偵測的機器人資訊
+        # 收集自動偵測的機器人資訊（補充未手動標記的 label）
         auto_robots = []
-        if not self._robot_markers and robot_mgr.use_mot:
+        if robot_mgr.use_mot:
+            existing_labels = {m[0] for m in self._robot_markers}
             for label, info in robot_mgr.robot_info.items():
-                auto_robots.append((label, info.get("alliance", "")))
+                if label not in existing_labels:
+                    auto_robots.append((label, info.get("alliance", "")))
             if auto_robots:
-                print(f"[INFO] MOT 自動模式: 最終 "
-                      f"{len(auto_robots)} 台機器人")
+                print(f"[INFO] MOT 自動偵測: 補充 "
+                      f"{len(auto_robots)} 台未標記機器人")
                 for lbl, alliance in auto_robots:
                     print(f"  - {lbl} ({alliance})")
 
@@ -2429,10 +2454,30 @@ class ScoringAnalyzer(ctk.CTk):
             f"分析中{mode_str}... 幀 {frame_idx}/{self.total_frames - 1} ({pct:.0f}%)",
             COLORS["info"])
 
-    def _analysis_error(self, msg):
-        self._analyzing = False
+    def _cancel_analysis(self):
+        """用戶點擊中斷按鈕。"""
+        self._analysis_cancel = True
+        self.analyze_cancel_btn.configure(state="disabled")
+        self._set_status("正在中斷分析...", COLORS["error"])
+
+    def _restore_analyze_buttons(self):
+        """恢復分析按鈕到初始狀態。"""
         self.analyze_quick_btn.configure(state="normal")
         self.analyze_full_btn.configure(state="normal")
+        self.analyze_cancel_btn.pack_forget()
+        self.analyze_cancel_btn.configure(state="normal")
+
+    def _analysis_cancelled(self):
+        """分析被用戶中斷。"""
+        self._analyzing = False
+        self._restore_analyze_buttons()
+        self.progress_bar.pack_forget()
+        self._set_status("分析已中斷", COLORS["error"])
+        print("[INFO] 分析已被用戶中斷")
+
+    def _analysis_error(self, msg):
+        self._analyzing = False
+        self._restore_analyze_buttons()
         self.progress_bar.pack_forget()
         self._set_status(f"分析錯誤: {msg}", COLORS["error"])
 
@@ -2452,8 +2497,7 @@ class ScoringAnalyzer(ctk.CTk):
         self._analysis_done = True
         self._analyzing = False
 
-        self.analyze_quick_btn.configure(state="normal")
-        self.analyze_full_btn.configure(state="normal")
+        self._restore_analyze_buttons()
         self.progress_bar.pack_forget()
 
         # 添加自動偵測的機器人到標記列表（用於顯示和統計）

@@ -1,5 +1,428 @@
 # FRC Scoring Analyzer — Progress
 
+## Session: 2026-03-15 (30) — MOT Hungarian 匹配 + 射手歸因大幅簡化
+
+### 完成項目
+- [x] **scoring.py UnboundLocalError 修復** — `reattribute_shooters` 中 `sorted_events` 在第 1538 行使用但未定義，補上定義
+- [x] **MOT Round 1 Hungarian 匹配** — `robot_tracker.py` Round 1 ACTIVE 匹配從 greedy 排序改為 **Hungarian 算法**（`scipy.optimize.linear_sum_assignment`），建立 cost matrix（detections x active labels），保證全域最優匹配，解決兩台機器人靠近時交換 ID 的問題
+- [x] **HP 歸因簡化** — `scoring.py:_check_hp_attribution` 原本 3 層判定（線段交叉+距離容忍+起源判定+反彈偵測+速度門檻+拋物線驗證等 ~180 行）簡化為只檢查球軌跡是否穿越 HP 線段（~20 行），穿越即算 HP（conf=0.95）
+- [x] **射手歸因大幅簡化** — `scoring.py:reattribute_shooters` 原本 140 輪迭代的複雜邏輯（~900 行）簡化為：HP 穿越判定 + 非 HP 沿軌跡回溯 80 幀找最近機器人（`_simple_proximity_attribution()`）
+
+### 修改檔案
+- `robot_tracker.py` — 新增 `from scipy.optimize import linear_sum_assignment`，`_match_direct()` Round 1 改用 Hungarian 算法建立 cost matrix 做全域最優匹配
+- `scoring.py` — 簡化 `_check_hp_attribution`（只檢查線段交叉）、重寫 `reattribute_shooters`（HP + 簡單 80 幀回溯）、新增 `_simple_proximity_attribution()`。舊方法 `_find_shooter_by_trajectory`/`_trace_shooter`/`_extrapolate_shooter`/`_proximity_fallback` 保留（出手偵測 `detect_shots` 仍使用）
+
+### 5-Question Reboot Check
+1. **做什麼？** MOT 匹配穩定性提升 + 射手歸因邏輯大幅簡化
+2. **進度？** 全部完成，UnboundLocalError 已修復，Hungarian 匹配已替換 greedy，歸因邏輯已簡化
+3. **下一步？** 用實際影片測試驗證：(a) Hungarian 匹配是否解決靠近時 ID 交換，(b) 簡化歸因準確度是否可接受；清理保留的舊方法（如確認不再需要）
+4. **阻礙？** 需要實際影片測試驗證
+5. **檔案？** `robot_tracker.py`（Hungarian 匹配）、`scoring.py`（簡化歸因）
+
+---
+
+## Session: 2026-03-15 (29) — 射手歸因迭代 121~140：Temporal Gap+Approach Angle+Formation+Direction Consistency+Stationary Bonus+Rate Limiting+Sigmoid Calibration+Period Report（Endurance #11）
+
+### 完成項目
+- [x] **迭代 121: Trace Hit Temporal Gap Penalty** — trace hits 之間時間間隔>15幀→conf-0.06，>8幀→-0.03（不連續觀測降信心）
+- [x] **迭代 122: Ball Approach Angle Validation** — 球最後數段飛行方向若遠離zone→conf-0.06（物理不合理）
+- [x] **迭代 123: Robot Formation Context** — 場景中同聯盟3+台且對方≤1台+射手同聯盟→+0.02（進攻陣型弱信號）
+- [x] **迭代 124: Extrap Direction Consistency** — 外推候選→球首點方向與球速度方向cosine>0.7→+0.04，<0→-0.06
+- [x] **迭代 125: Robot Stationary Bonus** — trace hit 時射手移動<15px→+0.04（瞄準姿態），<30px→+0.02
+- [x] **迭代 126: Multi-Event Robot Rate Limiting** — 同機器人90幀內3+進球→後續低信心者-0.08（cycle time限制）
+- [x] **迭代 127: Trace Hit Spatial Clustering** — hits空間半徑<30px→+0.04，<60px→+0.02，>200px→-0.04
+- [x] **迭代 128: Proximity Alliance Second-Best** — Proximity最佳為對方聯盟但同聯盟候選距離差<30%→切換
+- [x] **迭代 129: Confidence Sigmoid Calibration** — 事後sigmoid映射(k=4)拉開0.3~0.7區間conf，70%原始+30%校準
+- [x] **迭代 130: Report Period Breakdown** — get_attribution_report()新增period_breakdown（Auto/Teleop各自count+avg_confidence）
+- [x] **迭代 131: Robot Distance to Zone at Goal Frame** — 射手進球幀距zone>800px→-0.04，<300px→+0.02
+- [x] **迭代 132: Zone Alliance Adaptive Prior** — zone近期(600幀)80%+高信心歸因同聯盟→後續低信心同聯盟+0.03
+- [x] **迭代 133: Extrap Gravity Direction Validation** — 球初始vy>0(向下)卻用重力修正→-0.04（物理不合理）
+- [x] **迭代 134: Trace Window Overlap Detection** — 兩進球事件球軌跡時間重疊>5幀→較低信心者-0.04
+- [x] **迭代 135: Trace Pre-Shot Deceleration** — trace hit前球速遞減→+0.03（被接住跡象），加速→-0.03
+- [x] **迭代 136: HP Multi-Point Proximity** — HP Layer2近HP點數≥3→+0.04，僅1點→-0.05
+- [x] **迭代 137: Extrap Alliance Tie-Breaker** — 外推候選分數接近時(15%內)偏好同聯盟候選
+- [x] **迭代 138: Short Traj Zone Distance** — 短軌跡球起點離zone>500px→-0.04，<200px→+0.02
+- [x] **迭代 139: Global Alliance Consistency Ratio** — 聯盟一致率<70%時輸出系統性問題警告
+- [x] **迭代 140: Extrap Candidate Spatial Spread** — 候選空間分布半徑>400px→-0.04（原點不精確），<100px→-0.02（密集難區分）
+
+### 修改檔案
+- `scoring.py` — 20 項改進：Trace(Temporal Gap+Spatial Clustering+Pre-Shot Decel+Stationary Bonus) + Extrap(Direction Consistency+Gravity Validation+Alliance Tie-Breaker+Spatial Spread) + HP(Multi-Point Proximity) + Proximity(Alliance Second-Best) + Short_traj(Zone Distance) + 通用(Approach Angle+Formation Context+Zone Distance+Alliance Prior+Rate Limiting+Window Overlap+Sigmoid Calibration+Alliance Ratio Warning) + Report(Period Breakdown)
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 140 輪迭代完成（本 session 迭代 121~140）— 20 項改進
+3. **下一步？** 迭代 141+：Bayesian 信心校準（Prior+Likelihood）、機器人攻守判定（zone停留模式）、自適應方法權重學習（歷史準確度回饋）、Ensemble Stacking（組合多方法預測）；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（3230 行，全部歸因邏輯 + period_breakdown + sigmoid calibration）
+
+---
+
+## Session: 2026-03-15 (28) — 射手歸因迭代 101~120：Adaptive Ensemble+Robot Profile+Global Consistency+Method Floor+Alliance v2+Multi-zone Guard（Endurance #10）
+
+### 完成項目
+- [x] **迭代 101: Adaptive Method Ensemble** — Trace+Extrap 都成功時，根據信心度加權融合選勝者（非硬 Trace>Extrap 切換），勢均力敵時大幅減分
+- [x] **迭代 102: Robot Shooting Profile** — 高信心歸因建立射手位置先驗，後續低信心事件若球在類似位置→+0.04
+- [x] **迭代 103: Multi-ball Interference** — 進球幀附近有 2+ 球同時飛行→conf-0.06，1球→-0.03
+- [x] **迭代 104: Global Attribution Consistency** — 同機器人 60 幀內兩次歸因但球位置差>800px→降低較低信心的-0.10
+- [x] **迭代 105: Certainty Level Recompute** — 全部 confidence 調整完成後統一重算 certainty_level（防止中途修改後 certainty 不一致）
+- [x] **迭代 106: Robot Velocity at Shot** — 射手在射球時快速遠離 zone（cosine<-0.5）→conf-0.05
+- [x] **迭代 107: HP Zone Consistency** — HP 聯盟與進球 zone 聯盟不匹配→HP conf-0.20
+- [x] **迭代 108: Proximity Occupancy History** — 機器人在球附近停留 15+幀→score×0.85，≤3幀→×1.10
+- [x] **迭代 109: Trajectory Segment Quality** — 軌跡大缺口(>15幀)→-0.04，平均間隔>5→-0.03，密集高品質→+0.02
+- [x] **迭代 110: Method Confidence Floor** — 每種方法設最低信心門檻（hp:0.45/trace:0.30/extrap:0.20/short:0.15/prox:0.15）防止過度扣分
+- [x] **迭代 111: Smart Alliance Correction v2** — 多幀搜索(±5幀)+球起點+終點雙距離+多候選排序，門檻提高到 conf<0.45
+- [x] **迭代 112: Extrap Origin Uncertainty** — 速度不確定性(CV)×速度×外推幀數=原點不確定性半徑，>300px→-0.08
+- [x] **迭代 113: Trace Candidate Diversity** — 4+不同候選 label→-0.08，3 候選→-0.04（高歧義）
+- [x] **迭代 114: Extrap Dist-to-Origin Ratio** — 候選距離佔外推總距離>50%→-0.06，<15%→+0.03
+- [x] **迭代 115: Proximity Candidate Count Penalty** — 6+候選→-0.06，4+→-0.03
+- [x] **迭代 116: Multi-zone Guard** — 同一 ball_track_id 進不同 zone→後者 conf-0.15+警告
+- [x] **迭代 117: Trace Hit Recency Bias** — 射出前最後 10 幀的 hit 時間權重×1.5（最關鍵時刻）
+- [x] **迭代 118: Extrap Trajectory Length Confidence** — 10+軌跡點→+0.04，≤3點→-0.06（短軌跡外推不可靠）
+- [x] **迭代 119: Shot Speed Profile Matching** — 出手速度>5x門檻→-0.08（跳幀），<1.2x門檻→-0.04（勉強）
+- [x] **迭代 120: Report per-method Quality** — get_attribution_report() 新增 method_quality 欄位（每方法的 avg_conf/high_conf_ratio/alliance_match_ratio）
+
+### 修改檔案
+- `scoring.py` — 20 項改進：Ensemble(加權融合) + 通用(Robot Profile/Multi-ball/Global Consistency/Certainty Recompute/Method Floor/Multi-zone Guard) + Trace(Recency Bias/Candidate Diversity) + Extrap(Origin Uncertainty/Dist Ratio/Trajectory Length) + HP(Zone Consistency) + Proximity(Occupancy/Candidate Count) + Alliance(v2多候選) + Shot(Speed Profile) + Report(per-method quality)
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 120 輪迭代完成（本 session 迭代 101~120）— 20 項改進
+3. **下一步？** 迭代 121+：自適應方法權重學習（根據歷史準確度動態調整方法優先級）、Bayesian 信心校準、機器人隊形偵測（攻/守判定）；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（全部歸因邏輯 + `get_attribution_report()` + method_quality）
+
+---
+
+## Session: 2026-03-15 (27) — 射手歸因迭代 81~100：Bug修復+Alliance修正+軌跡完整度+群聚罰分+角度評分+減速模型+確定性分級+熵計算+報告增強（Endurance #9）
+
+### 完成項目
+- [x] **迭代 81: 修復未定義變數 bug** — `_find_shooter_by_trajectory` Line 1354 的 `return result` 修正為正確的 unknown 回傳值（`result` 變數未定義會導致 NameError）
+- [x] **迭代 82: Alliance 自動修正** — 低信心(conf<0.40) + 聯盟不匹配時，自動嘗試切換到同聯盟候選機器人（距離合理範圍內）
+- [x] **迭代 83: 軌跡完整度信心調整** — 球軌跡覆蓋率（持續時間 / 預估飛行時間）高→+0.03，低→-0.05
+- [x] **迭代 84: 機器人群聚罰分** — Trace 候選點附近 4+ 台機器人 conf-0.08，3 台 conf-0.04
+- [x] **迭代 85: Proximity 角度評分** — proximity fallback 中加入球飛行方向評分：機器人在球來源方向→×0.85，反方向→×1.15
+- [x] **迭代 86: Extrap 擬合殘差信心** — 拋物線擬合殘差<5px→+0.05，>30px→-0.05
+- [x] **迭代 87: 速度剖面分類** — 分類球射出類型（lob/line drive/roller），根據類型調整 Extrap 信心
+- [x] **迭代 88: HP 球來源方向驗證** — HP 歸因後驗證球確實從 HP 方向飛來（cosine<-0.5→conf-0.15）
+- [x] **迭代 89: Trace hit 品質過濾** — 過濾距離>中位數×2 的離群 hit（保留至少 2 個）
+- [x] **迭代 90: 機器人偵測一致性加分** — trace 範圍內機器人可見度 >80%→+0.03，<30%→-0.05
+- [x] **迭代 91: 球減速模型** — Extrapolation 加入空氣阻力（drag_factor=0.005），反推更準確的初始速度
+- [x] **迭代 92: 同 Zone 時序先驗** — 同一 zone 200 幀內近期歸因全是同聯盟 → 弱先驗 +0.02
+- [x] **迭代 93: 確定性等級分類** — ScoreEvent 新增 certainty_level 欄位：certain(≥0.80)/likely(≥0.50)/uncertain(≥0.30)/unknown(<0.30)
+- [x] **迭代 94: Trace 速度轉換銳度加權** — trace 投票加入速度梯度權重：hit 後速度比 ≥3x→×1.5，≥2x→×1.2
+- [x] **迭代 95: Extrap 收斂驗證** — 多個檢查點候選中，最佳機器人 check 數領先 ≥2→額外 +0.03
+- [x] **迭代 96: 多候選熵計算** — 候選分數分布熵值 >0.9（高度均勻）→conf-0.06，>0.8→-0.03
+- [x] **迭代 97: Zone 距離信心** — 球起點離 zone <80px → conf-0.05（球沒飛多遠，歸因資訊少）
+- [x] **迭代 98: Trace 最接近點優先** — 球-機器人最小距離的 hit 額外加權 ×1.3
+- [x] **迭代 99: Proximity 候選穩定性** — 機器人位置穩定（10 幀內移動<30px）→+0.03，快速移動(>150px)→-0.03
+- [x] **迭代 100: 報告增強** — get_attribution_report() 新增 certainty_counts、alliance_mismatches、per-event certainty 欄位
+
+### 修改檔案
+- `scoring.py` — 20 項改進：Bug 修復(未定義變數) + Alliance(自動修正) + 通用(軌跡完整度+Zone距離+確定性分級) + Trace(群聚罰分+hit品質過濾+最近點優先+偵測一致性+速度轉換銳度) + Extrap(擬合殘差+速度剖面+減速模型+收斂驗證+候選熵) + HP(方向驗證) + Proximity(角度評分+穩定性) + 時序先驗 + 報告增強
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 100 輪迭代完成（本 session 迭代 81~100）— 20 項改進 + 1 個 bug 修復
+3. **下一步？** 迭代 101+：自適應方法選擇（根據軌跡品質自動選最佳歸因路徑）、機器學習置信度校準、Trace/Extrap 加權融合（非硬切換）；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（全部歸因邏輯 + `get_attribution_report()` + `certainty_level`）
+
+---
+
+## Session: 2026-03-15 (26) — 射手歸因迭代 61~80：自適應回溯+拋物線擬合+方向驗證+場景複雜度+歸因品質評分+JSON報告（Endurance #8）
+
+### 完成項目
+- [x] **迭代 61: Trace 回溯深度自適應** — 根據球速動態調整回溯範圍：快球 ×0.6（60%）、慢球 ×1.3（130%），避免快球追溯過深、慢球追溯不足
+- [x] **迭代 62: Zone 方向驗證** — 球後半段軌跡應朝 scoring zone 移動：遠離 zone → conf-0.08，靠近 zone → conf+0.03
+- [x] **迭代 63: Trace 飛行方向一致性** — 多 hit 的飛行方向用圓形方差評估：r_bar<0.5（高度不一致）conf-0.08，r_bar>0.85（高度一致）conf+0.03
+- [x] **迭代 64: Proximity 守門員排除（強化版）** — _proximity_fallback 中對方聯盟且離 zone <120px 的機器人分數 ×1.8 大幅懲罰
+- [x] **迭代 65: Extrapolation 拋物線軌跡模型** — 前 6 個軌跡點做手動二次多項式擬合（避免 numpy 依賴），外推位置取拋物線和線性的平均（穩健折衷）
+- [x] **迭代 66: Trace 搜索窗口自適應擴展** — 初始窗口無 hit 時自動擴展 50% 再搜索，找到即停止
+- [x] **迭代 67: HP 反彈偵測** — 球軌跡在 HP 前有急轉彎（>90°）= 牆壁反彈 → HP 置信度 -0.20
+- [x] **迭代 68: 場景複雜度自適應置信度** — 進球幀 ≥8 台機器人 conf-0.05（擁擠），≤2 台 conf+0.03（稀疏）
+- [x] **迭代 69: Trace 候選機器人移動方向排除** — 機器人快速遠離球（移動方向 cosine < -0.5）→ 分數 ×1.3 懲罰
+- [x] **迭代 70: 連續進球射手偏好** — 同機器人 300 幀內有另一進球 → conf+0.03（FRC 機器人常連續投球）
+- [x] **迭代 71: Extrapolation 候選位置歷史驗證** — 機器人在外推時間段內持續出現在路徑附近 → conf+0.05
+- [x] **迭代 72: Trace 持球距離穩定性評分** — 同機器人多 hit 距離方差低（std<15px）→ conf+0.05（穩定持球），std>60px → conf-0.03
+- [x] **迭代 73: HP 速度特徵分布驗證** — Layer 2 加入球速特徵：中速（典型 HP 拋球）conf+0.03，高速（像機器人射球）conf-0.05
+- [x] **迭代 74: Proximity 時間窗口自適應** — 球速快 → lookback ×1.3（看更遠），球速慢 → lookback ×0.7（看更近）
+- [x] **迭代 75: 歸因品質綜合評分** — 0~100 分：已知比例 ×25 + 高信心比例 ×30 + 強方法比例 ×25 + 聯盟一致比例 ×20
+- [x] **迭代 76: Trace/Extrap 不一致時降低置信度** — 交叉衝突（兩方法指向不同機器人）→ conf-0.06 + 診斷日誌
+- [x] **迭代 77: 球軌跡 EMA 平滑預處理** — alpha=0.7 輕量 EMA 平滑軌跡座標（保留 70% 原始值），減少偵測抖動
+- [x] **迭代 78: Short_traj 方向輔助** — 短軌跡用球首段飛行方向反推射手：方向一致 ×0.85，方向相反 ×1.15
+- [x] **迭代 79: 歸因穩定性檢查** — 同 zone 5 秒內相鄰進球射手聯盟不一致 → 警告（可能誤判）
+- [x] **迭代 80: 結構化歸因報告** — `get_attribution_report()` 返回 JSON dict：method_counts、quality_score、per_robot 統計、逐事件明細
+
+### 修改檔案
+- `scoring.py` — 20 項改進：Trace（自適應回溯+搜索擴展+方向一致性+距離穩定性+機器人移動方向+EMA平滑）、Extrapolation（拋物線擬合+位置歷史驗證+不一致降信）、HP（反彈偵測+速度特徵）、Proximity（守門員排除強化+時間窗口自適應）、Short_traj（方向輔助）、通用（Zone方向驗證+場景複雜度+連續進球偏好+品質評分+穩定性檢查+JSON報告）
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 80 輪迭代完成（本 session 迭代 61~80）— 20 項改進覆蓋全部歸因路徑 + 品質指標 + 結構化報告
+3. **下一步？** 迭代 81+：自適應方法選擇（根據軌跡品質自動選最佳歸因路徑）、機器學習置信度校準、歸因一致性自動修復；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（全部歸因邏輯 + `get_attribution_report()`）
+
+---
+
+## Session: 2026-03-15 (25) — 射手歸因迭代 41~60：持球停留+射出方向+重力補償+交叉驗證+守門員排除+距離分級（Endurance #7）
+
+### 完成項目
+- [x] **迭代 41: Trace 持球停留偵測（dwell detection）** — 同一機器人連續 3+ 個低速 hit 偵測為持球證據，dwell label 投票加權 ×1.5，conf 加分 +0.05~0.10
+- [x] **迭代 42: Trace 射出方向驗證** — hit 點後球加速方向 vs 機器人→球方向的 cosine：正向（球從機器人飛出）conf+0.05，反向（球飛向機器人）conf-0.05
+- [x] **迭代 43: HP 穿越速度比例置信度** — Layer 1 conf 從固定 0.95 改為速度分級：高速 0.95、中速 0.92、低速 0.90
+- [x] **迭代 44: Extrapolation 重力補償** — 拋物線修正：origin_y 加入 0.5×g×t² 重力項（g=0.5 px/f²），多點驗證同步修正
+- [x] **迭代 45: Trace 趨近-發散模式偵測** — hit 前球靠近機器人（距離遞減）+ hit 後球遠離（距離遞增）= 接球→射出週期，conf+0.08
+- [x] **迭代 46: Proximity 時間加權多幀平滑** — 機器人距離從單幀改為 ±5 幀時間衰減加權平均（w=1/(1+|dt|/3)），減少單幀位置誤差
+- [x] **迭代 47: 跨方法交叉驗證** — Trace 成功時同時跑 Extrapolation，兩者一致則 conf+0.08，增加診斷日誌
+- [x] **迭代 48: 置信度校準 + 診斷增強** — reattribute 摘要加入置信度分布直方圖（5 個 bucket）+ Extrapolation 診斷顯示重力補償量
+- [x] **迭代 49: Trace 低速球分類** — 區分靜止持球（< 3 px/f，權重 ×1.3）和滾地球（3~shot），多個持球 hit conf+0.05
+- [x] **迭代 50: Extrapolation 機器人速度補償** — 用 ±2 幀估算機器人速度，反推球首次偵測幀時的機器人位置，取原始/補償位置中較近的
+- [x] **迭代 51: HP 後續軌跡拋物線驗證** — 穿越 HP 後軌跡 dy 先負後正（拋物線弧）→ Layer 2 conf=0.82、Layer 3 conf=0.63
+- [x] **迭代 52: 歸因方法切換診斷** — Trace 無命中時輸出診斷（軌跡點數 + 搜索範圍）
+- [x] **迭代 53: Trace 多候選距離差異門檻** — 前兩名原始距離差 < 20px 時 conf-0.05（距離上無法區分）
+- [x] **迭代 54: Extrapolation 分段外推** — 軌跡早期方向變化 >30° 時只用最前 2 個可靠點做外推（早期點更接近真實射出方向）
+- [x] **迭代 55: Short_traj 聯盟強化偏好** — 距離乘數從 ×0.85 改為 ×0.70（資訊少時聯盟作為強先驗），聯盟匹配 conf+0.08
+- [x] **迭代 56: 守門員排除邏輯** — 歸因機器人在進球幀距 zone 中心 <80px 且非同聯盟 → conf-0.15（可能是防守方守門員）
+- [x] **迭代 57: Trace 速度突變點精確定位** — 優先選擇低速→高速轉變的最後一個低速 hit 作為 primary（球離開機器人的精確時刻）
+- [x] **迭代 58: Proximity 射手距離分級置信度** — <80px: 0.45, <150px: 0.38, <300px: 0.30, ≥300px: 0.22
+- [x] **迭代 59: HP→機器人消歧義增強** — 支援 Trace 和 Extrapolation 兩種方法的消歧義，加入 conf≥0.50 門檻
+- [x] **迭代 60: 歸因摘要報告增強** — 加入各方法平均置信度統計
+
+### 修改檔案
+- `scoring.py` — 20 項改進覆蓋全部歸因路徑：Trace（持球停留+射出方向+趨近發散+速度突變+距離差異+低速球分類）、Extrapolation（重力補償+機器人速度+分段外推）、HP（速度比例+拋物線驗證+消歧義）、Proximity（多幀加權+距離分級）、Short_traj（聯盟強偏好）、通用（交叉驗證+守門員排除+診斷增強）
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 60 輪迭代完成（本 session 迭代 41~60）— 20 項改進覆蓋全部歸因路徑
+3. **下一步？** 迭代 61+：Trace 回溯深度自適應、Extrapolation 多段路徑積分、進球/未進球事件的歸因一致性強化；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（全部歸因邏輯：`_trace_shooter` + `_extrapolate_shooter` + `_proximity_fallback` + `_check_hp_attribution` + `_find_shooter_by_trajectory` + `reattribute_shooters`）
+
+---
+
+## Session: 2026-03-15 (24) — 射手歸因迭代 29~40：非線性方向 + 加權投票 + 短軌跡 + 曲率/速度/距離趨勢 + HP 方向驗證（Endurance #6）
+
+### 完成項目
+- [x] **迭代 29: 非線性方向加權** — Trace + Extrapolation 方向評分從線性 `1-w*cs` 改為非線性：正向 cs 用 `cs²` 放大獎勵，負向 cs 用 `|cs|` 懲罰
+- [x] **迭代 30: Trace 距離加權投票** — 多點共識從等權投票改為距離反比加權 `1/(1+dist/100)`，近距離 hit 票數更高
+- [x] **迭代 31: 短軌跡特殊處理** — 新增 `short_traj` 歸因方法：軌跡 ≤5 點時 Trace/Extrapolation 都失敗，用球首次出現位置找最近機器人（conf=0.25）。統計陣列擴展為 6 元素
+- [x] **迭代 32: Trace 時間衰減** — 投票加權加入時間衰減 `1/(1+dt_to_goal/30)`，近期 hit 權重更高。最終權重 = 距離反比 × 時間衰減
+- [x] **迭代 33: Extrapolation 速度一致性** — 計算外推用速度的變異係數(CV)，CV>0.8 conf-0.15, CV>0.5 conf-0.08
+- [x] **迭代 34: Trace 距離趨勢分析** — 球遠離機器人（射出方向正確）conf+0.05，球靠近（可能是接球方）conf-0.10
+- [x] **迭代 35: Proximity fallback 聯盟偏好** — Proximity 加入 zone_alliance，同聯盟分數 ×SCORE_ALLIANCE_BIAS，conf+0.05
+- [x] **迭代 36: HP Layer 2/3 方向驗證** — Layer 2 後續點離 HP 更遠 conf=0.80，球靠近 HP conf=0.65。Layer 3 置信度 0.65→0.60
+- [x] **迭代 37: Extrapolation 多候選分散度罰分** — 前兩名分數 gap<1.1 conf-0.10, gap<1.2 conf-0.05
+- [x] **迭代 38: Extrapolation 反向驗證** — 球前幾個軌跡點是否在遠離候選：球靠近 conf-0.10，球遠離 conf+0.05
+- [x] **迭代 39: Extrapolation 曲率懲罰** — 前幾個速度向量的最大方向變化角：>60° conf-0.15, >45° conf-0.08
+- [x] **迭代 40: Extrapolation 診斷日誌增強** — debug 輸出新增 speed_cv + curve 角度
+
+### 修改檔案
+- `scoring.py` — 非線性方向加權(Trace+Extrap) + 距離+時間加權投票 + short_traj 歸因 + 速度一致性 CV + 距離趨勢 + Proximity 聯盟偏好 + HP 方向驗證 + 分散度罰分 + 反向驗證 + 曲率懲罰 + 診斷增強 + 統計擴展為 6 元素
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 40 輪迭代完成（本 session 迭代 29~40）— 12 項改進覆蓋 Trace/Extrap/Proximity/HP 四個歸因方法
+3. **下一步？** 迭代 41+：Trace 多候選累計評分、Extrapolation 分段線性外推（彎曲軌跡）；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（`_trace_shooter` + `_extrapolate_shooter` + `_proximity_fallback` + `_check_hp_attribution` + `_find_shooter_by_trajectory` + `reattribute_shooters`）
+
+---
+
+## Session: 2026-03-15 (23) — 射手歸因迭代 21~28：多點共識 + 重構 + 多點外推 + 梯度分析 + 診斷增強（Endurance #5）
+
+### 完成項目
+- [x] **迭代 21: Trace 多點共識** — Trace 從「第一個 hit 即返回」改為收集最多 8 個低速 trace 點（30 幀共識窗口），投票決定射手。≥3 點且另一機器人票數更多 → 覆蓋。完全共識 conf+0.10，多數共識 conf+0.05
+- [x] **迭代 22: _find_shooter_by_trajectory 重構** — 380 行巨型函式拆分為 4 個方法：`_find_shooter_by_trajectory`(49 行薄層) + `_trace_shooter`(~220 行) + `_extrapolate_shooter`(~120 行) + `_alliance_matches`(5 行靜態方法)
+- [x] **迭代 23: Extrapolation 多點驗證** — 外推改為沿路徑 3 個距離點（100%/66%/33%）檢查機器人，取最佳分數。多點確認 conf+0.05~0.10
+- [x] **迭代 24: Trace 速度梯度分析** — trace 點後 5 幀內最大速度 vs trace 點速度的比值（gradient）。≥3x 加速 conf+0.10，≥2x conf+0.05。區分「射出」與「球滾過」
+- [x] **迭代 25: Proximity fallback 多幀平均** — 從單幀球位置改為 ±5 幀內球位置平均，減少位置誤差。多點平均 conf+0.05
+- [x] **迭代 26: 低置信度事件增強診斷** — 低置信度警告新增 traj=軌跡點數 + robot_data=機器人資料幀數，幫助排查歸因失敗的根因
+- [x] **迭代 27: 聯盟不一致偵測** — reattribute 結尾檢查射手聯盟 vs 進球區域聯盟，不一致時發出警告（可能誤判）
+- [x] **迭代 28: Trace 穩定性硬門檻** — 孤立 trace 點（neighbor_confirmed=0, 單點, conf<0.65）→ 放棄 trace，fallback to Extrapolation
+
+### 修改檔案
+- `scoring.py` — 重構為 4 個方法 + Trace 多點共識 + 速度梯度 + 穩定性硬門檻 + Extrapolation 多點驗證 + Proximity 多幀平均 + 低置信度診斷增強 + 聯盟不一致偵測
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 28 輪迭代完成（本 session 迭代 21~28）— 架構重構 + 多點共識/驗證 + 梯度分析 + 穩定性門檻 + 診斷增強
+3. **下一步？** 迭代 29+：Extrapolation 方向加權非線性化；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（`_trace_shooter` + `_extrapolate_shooter` + `_proximity_fallback` + `reattribute_shooters`）
+
+---
+
+## Session: 2026-03-15 (22) — 射手歸因迭代 10~17：邊界防護 + 診斷 + 偏轉守衛 + HP 消歧義 + Proximity fallback（Endurance #4）
+
+### 完成項目
+- [x] **迭代 10: 幀間隔過濾 (SCORE_TRACE_MAX_DT=3)** — 球軌跡有大幀間隔時（遮擋導致 dt>3），速度估算不可靠。Trace/Extrapolation/方向評分全面過濾不可靠的速度段
+- [x] **迭代 11: 外推距離上限** — Extrapolation 外推距離限制為 `max_shooter_dist / speed_avg`，防止高速球外推過遠。速度計算改用可靠幀間隔
+- [x] **迭代 12: Per-robot 歸因方法統計** — `reattribute_shooters()` 新增 per-robot 歸因分布日誌（HP/trace/extrap/proximity/unknown）
+- [x] **迭代 13: HP Layer 1 速度門檻** — HP 歸因 Layer 1 新增速度門檻，慢速穿越跳過 Layer 2/3（`layer1_slow_cross` flag）
+- [x] **迭代 14: detect_shots 診斷摘要** — per-robot 出手數/命中率日誌
+- [x] **迭代 15: Trace 偏轉守衛（精緻化）** — 區分偏轉 vs 接球：前一幀速度 < 2x出手速度 → 漸減接球(允許)；>= 2x → 全速偏轉(跳過)
+- [x] **迭代 16: Proximity fallback** — Trace+Extrap 都失敗時，用 proximity_frames 前球位置找最近機器人。新增 `_proximity_fallback()`
+- [x] **迭代 17: HP vs 機器人消歧義** — HP 拋球被同聯盟機器人接住後射出 → 機器人歸因優先。5-step 線性決策流程
+- [x] **迭代 18: Trace 搜索深度報告** — 診斷日誌新增 `depth=Nf`，顯示 trace 往回追溯了多少幀
+- [x] **迭代 19: Shot-Goal 一致性驗證** — reattribute_shooters 結尾自動檢查 shot/goal 射手一致性
+- [x] **迭代 20: Shot 事件同步** — reattribute 改變 goal 射手後自動同步到對應 shot event
+
+### 修改檔案
+- `config.py` — 新增 `SCORE_TRACE_MAX_DT=3`
+- `scoring.py` — 大幅重構 `reattribute_shooters()` 為 5-step 決策流程；新增 `_proximity_fallback()` 方法；`_find_shooter_by_trajectory()`: seg_dts + dt 過濾 + 偏轉守衛精緻化 + 外推距離上限；`_check_hp_attribution()`: 速度門檻 + `layer1_slow_cross`；`detect_shots()`: per-robot 診斷
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 20 輪迭代完成（本 session 迭代 10~20）— 5 層歸因 + HP 消歧義 + 偏轉守衛精緻化 + proximity fallback + Shot 同步 + 診斷增強
+3. **下一步？** 迭代 21+：歸因置信度分數、Trace 多點共識；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（全部歸因邏輯）、`config.py`（SCORE_TRACE_MAX_DT）
+
+---
+
+## Session: 2026-03-14 (21) — 射手歸因迭代 5+6：Trace 方向感知 + 聯盟一致性偏好（Endurance #3）
+
+### 完成項目
+- [x] **迭代 5: Trace 方向感知評分** — Trace 方法原本只取最近機器人，當多個候選在 200px 內時新增方向評分：取得球在 trace 點之後的飛行方向（`_get_flight_dir_at`），用 cosine similarity 加權（`SCORE_DIRECTION_WEIGHT=0.3`），讓球飛行方向起源側的機器人獲得更低分數。單一候選時不觸發方向評分，保持原本行為
+- [x] **迭代 6: 聯盟一致性偏好** — `_find_shooter_by_trajectory()` 新增 `zone_alliance` 參數，Trace 和 Extrapolation 的多候選評分中加入聯盟偏好（同聯盟分數 ×0.85），`reattribute_shooters()` 傳遞 `event.alliance`。軟偏好：距離差大時仍以距離為主
+- [x] **迭代 7: detect_shots 聯盟偏好** — `detect_shots()` 提前查找進球事件的 zone alliance，傳遞給 `_find_shooter_by_trajectory()`
+- [x] **迭代 8: 診斷日誌增強** — Trace 和 Extrapolation 的診斷日誌顯示完整評分分解：`s=最終分數, dir=方向cosine, ally=聯盟匹配`。單候選時保持簡潔格式
+- [x] **迭代 9: SCORE_ALLIANCE_BIAS 提取到 config.py** — 聯盟偏好從硬編碼 `_ALLIANCE_BIAS=0.85` 移至 `config.py:SCORE_ALLIANCE_BIAS=0.85`，讓用戶可從設定面板調整
+- [x] **12 項測試全通過** — 方向 ✓、單候選 ✓、距離主導 ✓、HP ✓、Extrapolation ✓、聯盟 Trace ✓、聯盟距離 ✓、聯盟 Extrap ✓、reattribute ✓、detect_shots ✓、診斷格式 ✓、config 回歸 ✓
+
+### 修改檔案
+- `config.py` — 新增 `SCORE_ALLIANCE_BIAS=0.85`
+- `scoring.py` — `_find_shooter_by_trajectory()`: 新增 `zone_alliance` 參數 + `_alliance_matches()` 內部函式 + Trace 多候選方向+聯盟評分 + Extrapolation 聯盟評分 + 增強診斷日誌；`reattribute_shooters()` 傳遞 `event.alliance`；`detect_shots()` 提前查找 zone alliance；匯入 `SCORE_ALLIANCE_BIAS`
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 9 輪迭代完成（本 session 迭代 5~9）— 方向感知 + 聯盟偏好 + 診斷增強 + config 提取
+3. **下一步？** 迭代 10+：考慮置信度分數、Trace 搜索範圍動態化；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（`_find_shooter_by_trajectory` + `detect_shots` + `reattribute_shooters`）、`config.py`（SCORE_ALLIANCE_BIAS）
+
+---
+
+## Session: 2026-03-14 (20) — 射手歸因迭代 4：detect_shots 一致性 + Trace 精度提升（Endurance #2）
+
+### 完成項目
+- [x] **迭代 4a: detect_shots() 歸因統一** — `detect_shots()` 改用 `_find_shooter_by_trajectory()` 取代 Ball Ownership + 簡單距離歸因，使 miss（未進球）射手歸因與 `reattribute_shooters()` 一致。移除已無呼叫者的 `_get_ball_owner_at_frame()`
+- [x] **迭代 4b: Trace 逐幀檢查** — Trace 方法從 `range(..., 0, -2)` 改為 `range(..., 0, -1)` 逐幀檢查，避免跳過球剛減速的關鍵幀
+- [x] **迭代 4c: Trace 回溯窗口用幀號限制** — 從陣列索引改為幀號 `trace_min_frame = goal_frame - proximity_frames`，避免有跳幀時追溯範圍過大
+- [x] **5 項測試全通過** — detect_shots 軌跡歸因 ✓、reattribute 一致性 ✓、Trace 窗口限制 ✓、HP 優先 ✓、外推歸因 ✓
+
+### 修改檔案
+- `scoring.py` — `detect_shots()` 改用 `_find_shooter_by_trajectory()`；移除 `_get_ball_owner_at_frame()`；Trace 改逐幀 + 幀號窗口限制
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 4 輪迭代完成 — 迭代 1~3 軌跡追溯+外推+方向評分，迭代 4 detect_shots 一致性+Trace 精度
+3. **下一步？** 迭代 5+：考慮方向 — Trace 找到多個候選時的方向加權評分；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（`_find_shooter_by_trajectory` + `detect_shots` + `reattribute_shooters`）
+
+---
+
+## Session: 2026-03-14 (19) — 射手歸因根本性重寫：軌跡追溯+外推+方向評分（Endurance #1, 3 iterations）
+
+### 完成項目
+- [x] **迭代 1: 根因分析+軌跡起源外推** — 識別 Proximity 歸因根本缺陷（看球的位置而非球從哪來）；新增 `_find_shooter_by_trajectory()` 兩段式策略（低速段起源 + 速度外推）+ 方向感知評分（cosine similarity 加權）
+- [x] **迭代 2: detect_shots 同步+診斷日誌** — `detect_shots()` 改用出手前一幀（`traj_sorted[i]`）的球位置找射手（而非出手後的 `traj_sorted[i+1]`）+ 使用 `_get_robot_positions_near_frame()` 統一 fallback；`_find_shooter_by_trajectory()` 新增 `debug_frame` 參數輸出候選人排名診斷日誌
+- [x] **迭代 3: 軌跡追溯（Trace）方法** — 重寫 `_find_shooter_by_trajectory()` 主要策略為「軌跡追溯」：從後往前逐幀檢查「球速 < 出手速度 且 機器人在 200px 內」，直接驗證機器人鄰近性避免僅靠速度門檻的誤判。Trace 失敗時才 fallback 到速度外推+方向評分
+- [x] **config.py 新增 3 常數** — `SCORE_EXTRAPOLATE_FRAMES=20`、`SCORE_DIRECTION_WEIGHT=0.3`、`SCORE_MIN_VELOCITY_FOR_DIR=5`
+- [x] **5 項測試通過** — 外推歸因 ✓、追溯基礎 ✓、撿球後射出 ✓、遠距射擊 ✓、HP 歸因 ✓
+
+### 修改檔案
+- `config.py` — 新增 3 個軌跡歸因常數
+- `scoring.py` — 新增 `_find_shooter_by_trajectory()`（Trace+Extrapolation 雙策略）、`_get_robot_positions_near_frame()`；重寫 `reattribute_shooters()` 為 HP > Trace > Extrapolation 三層；`detect_shots()` 改用 pre-spike 位置；更新 import
+- `FINDINGS.md` — 記錄技術發現 #5
+
+### 5-Question Reboot Check
+1. **做什麼？** 射手歸因精確度迭代改進（無盡迭代，直到用戶說停止）
+2. **進度？** 3 輪迭代完成 — Trace+Extrapolation 雙策略 + detect_shots 同步 + 診斷日誌，5 項測試全通過
+3. **下一步？** 等 Codex 審查結果 → 根據反饋迭代 4+；或用實際影片測試驗證效果
+4. **阻礙？** 需要實際影片測試驗證改善效果
+5. **檔案？** `scoring.py`（`_find_shooter_by_trajectory` + `reattribute_shooters` + `detect_shots`）、`config.py`（SCORE_EXTRAPOLATE/DIRECTION/MIN_VELOCITY 常數）
+
+---
+
+## Session: 2026-03-14 (18) — 遮擋追蹤跳框修復 + HP 歸因三層判定 + 標籤顏色修復 + 分析中斷按鈕
+
+### 完成項目
+- [x] **Bug 1: 遮擋時追蹤框跳到其他機器人** — Round 1 ACTIVE 匹配新增 `MOT_ACTIVE_MAX_DIST=200px` 距離上限 + IoU bbox 加權 + 遮擋區域附近 grace 降為 1 幀，防止遠距離搶 ID
+- [x] **Bug 2: HP 丟的球卻算在機器人身上** — `_check_hp_attribution()` 改為三層判定：Layer 1 線段交叉 > Layer 2 距離容忍 (`SCORE_HP_PROXIMITY` 50→150) > Layer 3 起源判定（球軌跡最早 3 點距 HP 線段 ≤ `SCORE_HP_ORIGIN_DIST=400px`）
+- [x] **Bug 3: Blue-N 標籤顯示紅色追蹤框** — 後處理重建 `robot_positions_cache` 時先 `clear()` 避免已移除 label 殘留 + `auto_robots` 改為總是補充未標記的 label（不再限制只在 `_robot_markers` 為空時收集）
+- [x] **Bug 4: 藍方 HP 進球數顯示 0** — 球在 HP 手中/剛拋出時未被偵測，軌跡起點已飛過 HP 線段。三層判定修復覆蓋此場景
+- [x] **新功能: 分析中斷按鈕** — 分析時顯示紅色「⏹ 中斷」按鈕，`_analysis_cancel` flag 讓 producer/consumer 迴圈提前退出
+
+### 修改檔案
+- `config.py` — 新增 `MOT_ACTIVE_MAX_DIST=200`、`SCORE_HP_ORIGIN_DIST=400`，`SCORE_HP_PROXIMITY` 50→150
+- `robot_tracker.py` — Round 1 ACTIVE 匹配加 `MOT_ACTIVE_MAX_DIST` 距離上限 + IoU bbox 加權
+- `scoring.py` — `_check_hp_attribution()` 重構為三層判定（交叉 > 距離 > 起源）+ 診斷日誌
+- `app.py` — 分析中斷按鈕 UI + `_analysis_cancel` flag + `robot_positions_cache` 重建前 `clear()` + `auto_robots` 總是補充未標記 label
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復 4 個追蹤/歸因 bug + 新增分析中斷功能
+2. **進度？** 全部完成，程式碼已修改
+3. **下一步？** 手動測試：遮擋場景追蹤穩定性 → HP 歸因正確性 → 標籤顏色一致性 → 中斷按鈕功能 → git commit
+4. **阻礙？** 無，需實際影片測試確認
+5. **檔案？** `robot_tracker.py`（MOT_ACTIVE_MAX_DIST 匹配）、`scoring.py`（_check_hp_attribution 三層）、`app.py`（_analysis_cancel + cache clear + auto_robots）、`config.py`（新常數）
+
+---
+
+## Session: 2026-03-14 (17) — MOT 追蹤框搶 ID 修復 + 射手歸因簡化
+
+### 完成項目
+- [x] **MOT Round 1 移除速度外推** — 所有 ACTIVE 軌跡匹配都用凍結位置（last_cx, last_cy），不做速度預測，避免飄移搶別人偵測
+- [x] **偵測端中心距離去重** — `detect_raw()` 在 NMS 之後加中心距離去重（100px），解決全幀+tiled 不同尺寸 bbox NMS IoU<0.5 無法合併的問題
+- [x] **幽靈偵測守衛** — `_match_direct()` 中未匹配偵測要建新標籤前，檢查 100px 內是否已有匹配偵測，有就跳過（防止重複偵測被分配到不同標籤）
+- [x] **Round 2 鄰近守衛** — LOST 復活時檢查偵測離已匹配偵測 <80px 則跳過
+- [x] **每幀 bbox IoU dedup** — 兩軌跡 bbox IoU>0.5 移除偵測幀少的（最後防線）
+- [x] **新增 MOT_DEDUP_IOU 常數** — config.py 新增 0.5
+- [x] **射手歸因簡化為 2 層** — 移除球所有權（Ball Ownership）層，改為：HP 線段交叉 > 距離回溯（80 幀前最近機器人）
+- [x] **距離回溯邏輯改變** — SCORE_PROXIMITY_FRAMES 15→80（約 2.7 秒 @30fps），從「回溯所有幀找最近距離」改為「只看第 80 幀前球的位置，找當時最近的機器人」
+
+### 修改檔案
+- `config.py` — 新增 MOT_DEDUP_IOU=0.5，SCORE_PROXIMITY_FRAMES 15→80
+- `robot_tracker.py` — Round 1 凍結位置、detect_raw 中心距離去重、幽靈偵測守衛、Round 2 鄰近守衛、每幀 IoU dedup
+- `scoring.py` — `_find_shooter()` 和 `reattribute_shooters()` 簡化為 2 層歸因（HP > Proximity），移除 Ball Ownership 層
+- `docs/superpowers/plans/2026-03-14-mot-freeze-dedup.md` — 實作計劃
+
+### 5-Question Reboot Check
+1. **做什麼？** 修復 MOT 追蹤框搶 ID 問題 + 射手歸因簡化
+2. **進度？** 程式碼修改完成，import + AST 驗證通過，尚未 git commit，需要手動測試驗證
+3. **下一步？** 手動測試：開影片 → 執行分析 → 觀察追蹤框是否還會搶 ID → 觀察射手歸因是否正確（80 幀前最近機器人）
+4. **阻礙？** 無程式碼阻礙，需要實際影片測試確認修復效果
+5. **檔案？** `robot_tracker.py`（detect_raw 去重 + _match_direct 匹配邏輯）、`scoring.py`（_find_shooter + reattribute_shooters）、`config.py`（SCORE_PROXIMITY_FRAMES=80, MOT_DEDUP_IOU=0.5）
+
+---
+
+## Session: 2026-03-14 (16) — YOLO 訓練資料擴增（8 賽事批次下載+標註+4 人分工審核）
+
+### 完成項目
+- [x] **批次下載 2026 FRC 賽事影片** — 從 25 個候選賽事篩選 8 個非廣角賽事（inmis, vaale, sccha, txbel, mimtp, nccab, ncwak, pahat），用 `batch_download.py` 下載影片
+- [x] **批次取幀裁切** — 用 `crop_events.py` 對 8 個賽事做 ROI 裁切 + 取幀，共提取 34,512 張圖片
+- [x] **Gemini 自動標註** — 用 `batch_annotate.py --sample 400` 從每賽事抽樣 400 張（共 3,200 張），Gemini 成功標註 2,895 張，收集到 `datasets/notyet/`
+- [x] **建立 4 人分工審核流程** — 將 2,895 張分成 4 份（各約 723-726 張）複製到 `E:\notyet_review\part1~4\`，每份含 images/ + labels/ + label_editor.py
+- [x] **新增工具腳本** — `batch_download.py`（批次下載）、`batch_annotate.py`（三階段 pipeline）、`collect_to_notyet.py`（收集標註）、`sync_reviewed.py`（審核→reviewed 同步）
+
+### 修改檔案
+- `batch_download.py` — 新增，批次下載多賽事影片工具
+- `batch_annotate.py` — 新增，三階段標註 pipeline（抽樣→標註→收集）
+- `collect_to_notyet.py` — 新增，收集標註結果到 notyet/ 工具
+- `sync_reviewed.py` — 新增，審核完成自動轉移到 reviewed/ 工具
+- `merge_datasets.py` — 新增 reviewed source 支援
+
+### 5-Question Reboot Check
+1. **做什麼？** 擴增 YOLO 機器人偵測訓練資料，利用 4 台筆電 + 4 人分工標註 2,895 張新圖片
+2. **進度？** 下載+取幀+Gemini 標註+分工分發全部完成，4 人審核進行中
+3. **下一步？** 等 4 人審核完收回 → `sync_reviewed.py` 同步到 reviewed/ → `merge_datasets.py` 合併資料集 → Colab 重新訓練 YOLOv26n → 匯出 ONNX 部署
+4. **阻礙？** 等待 4 人完成標註審核（每人 ~724 張）
+5. **檔案？** `batch_download.py`、`batch_annotate.py`、`collect_to_notyet.py`、`sync_reviewed.py`、`merge_datasets.py`、`E:\notyet_review\part1~4\`（審核工作目錄）
+
+---
+
 ## Session: 2026-03-14 (15) — MOT 遮擋處理實作（10/10 tasks 完成）
 
 ### 完成項目
