@@ -17,7 +17,6 @@ FRC Scoring Analyzer — 機器人進球偵測桌面應用，支援 HSV + AI 雙
 - NumPy, Pillow, SciPy
 - onnxruntime 1.17+ (YOLO ONNX 本地離線推理，支援 CUDA/DirectML/CPU 自動選擇)
 - supervision 0.21+ (ByteTrack 多目標追蹤)
-- google-genai (Gemini Vision API，自動標註用，`scripts/dataset/auto_annotate.py` 專用)
 
 ## Run Commands
 
@@ -30,23 +29,6 @@ python main.py
 
 # 啟動並載入影片
 python main.py path/to/video.mp4
-
-# 訓練機器人偵測模型（需額外安裝 roboflow, ultralytics）
-python scripts/dataset/train_robot_model.py --api-key YOUR_ROBOFLOW_KEY
-
-# Label Editor 互動標註工具
-python scripts/dataset/label_editor.py datasets/2024mslr
-python scripts/dataset/label_editor.py datasets/2024mslr --start 0 --end 1421    # 前半（分工用）
-python scripts/dataset/label_editor.py datasets/2024mslr --start 1421             # 後半（分工用）
-python scripts/dataset/label_editor.py datasets/2024mslr --labels labels_raw      # 自訂標註目錄
-python scripts/dataset/label_editor.py datasets/2026cosp --images images --labels labels
-# Space 鍵標記已審核，狀態存 review_state.json，支援斷點恢復
-
-# 批次下載 + 標註 pipeline
-python scripts/dataset/batch_download.py                       # 批次下載多賽事影片
-python scripts/dataset/batch_annotate.py --sample 400          # 三階段：抽樣→Gemini標註→收集
-python scripts/dataset/collect_to_notyet.py                    # 收集多賽事標註到 datasets/notyet/
-python scripts/dataset/sync_reviewed.py                        # 審核完成後同步到 datasets/reviewed/
 ```
 
 ## Architecture
@@ -94,51 +76,19 @@ scoring-analyzer/
 ├── PROGRESS.md            # 開發進度（每 session 紀錄）
 ├── FINDINGS.md            # 技術研究與決策
 ├── errors.md              # 錯誤追蹤
-├── train_colab.ipynb      # Colab 訓練 notebook（gitignored）
-│
-│   ── 工具腳本 ───────────────────────────────────────────────
-├── scripts/
-│   └── dataset/           # 13 個資料集處理工具（不 import 核心）
-│       ├── download_matches.py    # TBA API 查詢 + YouTube 下載
-│       ├── batch_download.py      # 批次下載多賽事影片
-│       ├── extract_frames.py      # 影片取幀
-│       ├── crop_events.py         # 影片裁切（crop.json 多解析度等比縮放）
-│       ├── auto_annotate.py       # Gemini Vision 自動標註 pipeline
-│       ├── batch_annotate.py      # 三階段標註 pipeline
-│       ├── label_editor.py        # 互動 YOLO bbox 編輯器（自製）
-│       ├── collect_to_notyet.py   # 收集多賽事 Gemini 標註到 notyet/
-│       ├── sync_reviewed.py       # 審核完成自動轉移到 reviewed/
-│       ├── merge_datasets.py      # 多賽事資料集合併 + train/val split
-│       ├── detect_bad_frames.py   # 壞幀偵測（過曝/紙花/假標註）
-│       ├── build_dataset.py       # 最終資料集組合
-│       └── train_robot_model.py   # 本地 YOLO 訓練腳本
 │
 │   ── 文件目錄 ───────────────────────────────────────────────
 ├── docs/
 │   ├── notebook/          # FRC 工程筆記（md/html/txt/EN 4 個版本）
 │   ├── plans/             # 設計文件與實作計劃（舊）
-│   ├── superpowers/       # Superpowers 設計規格與實作計劃
-│   │   ├── specs/
-│   │   └── plans/
-│   └── TRAIN_README.txt   # GPU 訓練步驟指南
+│   └── superpowers/       # Superpowers 設計規格與實作計劃
+│       ├── specs/
+│       └── plans/
 │
 │   ── 資源目錄 ───────────────────────────────────────────────
-├── models/                # ONNX 模型
+├── models/                # ONNX 模型（runtime 用，訓練在 D:\FRC\frc-train-review）
 │   ├── frc_robot.onnx             # YOLOv26n 機器人偵測（9.8 MB NMS-Free）
-│   ├── frc_robot_old*.onnx        # 舊版備份
-│   ├── object_tracking_vittrack_*.onnx  # VitTrack SOT
-│   └── backup/                    # 離根目錄的備份檔
-├── datasets/              # 訓練資料（gitignored）
-│   ├── 2024mslr/          # 主訓練集（2842 張）
-│   │   ├── images/, images_raw/, labels/, labels_raw/
-│   │   ├── videos/                # 87 部 720p 比賽影片
-│   │   └── yolo_dataset/          # YOLO train/val split + data.yaml
-│   ├── 2023mslr/          # 2023 Magnolia Regional
-│   ├── 2026*/             # 2026 賽季 14+ 個賽事（分工審核中）
-│   ├── notyet/            # 待審核標註收集區
-│   ├── merged/            # 合併資料集（1826 張）
-│   ├── reviewed/          # 最終審核資料集（part1~4 分工切割）
-│   └── labels_raw_orphoned/       # 早期孤立原始標註（2842 張 txt）
+│   └── object_tracking_vittrack_*.onnx  # VitTrack SOT
 ├── presets/               # Preset JSON（場地設定檔）
 │
 │   ── 忽略目錄 ───────────────────────────────────────────────
@@ -177,4 +127,4 @@ scoring-analyzer/
 開發過程中遇到錯誤，請記錄到 `errors.md`。
 
 ---
-*Last updated: 2026-04-14 (session 31) — 專案結構整理：腳本移至 scripts/dataset/，文件移至 docs/*
+*Last updated: 2026-04-15 (session 32) — 分離 dataset pipeline 至 D:\FRC\frc-train-review*
