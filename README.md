@@ -1,4 +1,23 @@
-# FRC Scoring Analyzer
+# 這球誰射的？— 電腦視覺自動計分（FRC Scoring Analyzer）
+
+> **第 66 屆全國中小學科學展覽會・電腦與資訊學科（高級中等學校組）大會獎佳作**（2026/7）｜第五分區展覽會 優等
+>
+> 從 FRC 賽場的計分爭議出發：用電腦視覺自動判定「這球是誰射的」。研究中發現主流多目標追蹤演算法 ByteTrack 在 4K 小目標場景失效（追蹤覆蓋率僅 5.4%），提出距離式匹配替代方案後覆蓋率達 100%；HSV 球偵測速度約為深度學習方法的 50 倍。
+
+| | |
+|---|---|
+| 作者 | 李昌侑（Rick Lee）— FRC 6998 UNIPARDS 程式組 |
+| 期間 | 程式 2026/02 – 2026/04；研究自 2026/01 起，54 頁實驗記錄簿（68 則研究日記） |
+| 佐證 | Demo 影片：https://www.youtube.com/watch?v=T3HfYUYANOY ・ 31 頁研究報告書與實驗記錄簿（面試攜原件） |
+| 後續 | 資料集 pipeline 於 2026/04 分離為 [frc-train-review](https://github.com/0908869905/frc-train-review)（影像標註平台） |
+
+**開發方式（AI 協作聲明）**：本專案以「與 AI 結對開發」完成：問題定義、架構設計、實驗設計與驗證由我負責，程式碼由我與 AI（Claude Code）協作產出；每個模組做什麼、為什麼選這個方案、哪裡會失效，由我判斷並負責。研究報告書「研究設備」表公開列出所有 AI 工具，並已於全國賽評審詢答中說明人機分工。`PROGRESS.md`／`FINDINGS.md`／`errors.md` 為開發期間的真實工作紀錄。
+
+**相關專案**：[科展・電腦視覺計分](https://github.com/0908869905/scoring-analyzer) ・ [影像標註平台](https://github.com/0908869905/frc-train-review) ・ [偵察 App](https://github.com/0908869905/frc-scouting-pass) ・ [偵察掃描與 OPR](https://github.com/0908869905/frc-scout-scanner) ・ [報帳系統](https://github.com/0908869905/frc-expense-money) ・ [台灣手語影音辭典](https://github.com/0908869905/tsl-sign-dictionary) ・ [園遊會點餐系統](https://github.com/0908869905/ordering-system)
+
+---
+
+# FRC Scoring Analyzer（使用說明）
 
 FRC 機器人進球偵測桌面應用 — HSV + AI 雙模式球偵測 + YOLO+ByteTrack 機器人多目標追蹤（MOT）+ VitTrack/CSRT 備用追蹤（SOT）+ 區域進入進球判定 + 出手偵測。
 
